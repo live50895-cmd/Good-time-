@@ -1,0 +1,6 @@
+{
+  "name": "Noor Haram 2026",
+  "description": "Noor Haram 2026 AI Health Companion with Google Docs integration, voice readout, Parchi & lab scanner, 66 medicines, Ramadan & Desi diet planners, pregnancy tracker, and 37,800+ health guides.",
+  "requestFramePermissions": ["camera", "microphone", "geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

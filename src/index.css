@@ -1,0 +1,159 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --app-bg: radial-gradient(circle at 15% 15%, #065f46 0%, #0f172a 48%, #020617 100%);
+  --card-bg: rgba(15, 23, 42, 0.72);
+  --card-highlight: rgba(255, 255, 255, 0.14);
+  --accent: #10b981;
+  --border-col: rgba(167, 243, 208, 0.28);
+  --glow-col: rgba(16, 185, 129, 0.22);
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html {
+  scroll-behavior: smooth;
+  max-width: 100%;
+  overflow-x: hidden;
+  font-size: 16px;
+}
+
+body {
+  font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  min-height: 100dvh;
+  max-width: 100%;
+  overflow-x: hidden;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  transition: font-size 0.2s ease, background-color 0.2s ease;
+}
+
+.font-mono,
+.tabular-nums {
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+body.big-font-mode {
+  font-size: 19px;
+}
+
+body.big-font-mode .text-xs {
+  font-size: 0.92rem;
+  line-height: 1.5;
+}
+
+body.big-font-mode button,
+body.big-font-mode select,
+body.big-font-mode input {
+  min-height: 44px;
+}
+
+.theme-surface {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.08) 0%, var(--card-bg) 55%, rgba(255, 255, 255, 0.03) 100%);
+  backdrop-filter: blur(14px) saturate(155%);
+  -webkit-backdrop-filter: blur(14px) saturate(155%);
+  border: 1px solid var(--border-col);
+  box-shadow: inset 0 1px 0 0 var(--card-highlight), 0 10px 28px -12px rgba(0, 0, 0, 0.55);
+}
+
+body.sun-mode .theme-surface {
+  background: rgba(255, 255, 255, 0.94);
+  border-color: rgba(15, 23, 42, 0.16);
+  box-shadow: 0 8px 24px -10px rgba(15, 23, 42, 0.14);
+}
+
+.body-hotspot {
+  cursor: pointer;
+  transition: transform 0.16s ease, filter 0.16s ease;
+}
+
+.body-hotspot:hover,
+.body-hotspot:active {
+  transform: scale(1.05);
+  filter: drop-shadow(0 0 8px #34d399);
+}
+
+@keyframes pulseSlow {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.07); }
+}
+
+.physio-anim {
+  animation: pulseSlow 2.4s infinite ease-in-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .physio-anim {
+    animation: none;
+  }
+  * {
+    scroll-behavior: auto;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Official Google Sign-In Material Button Styling */
+.gsi-material-button {
+  user-select: none;
+  background-color: #ffffff;
+  border: 1px solid #747775;
+  border-radius: 9999px;
+  color: #1f1f1f;
+  cursor: pointer;
+  font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  height: 40px;
+  padding: 0 16px 0 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  transition: background-color 0.18s ease, box-shadow 0.18s ease;
+  white-space: nowrap;
+}
+
+.gsi-material-button:hover:not(:disabled) {
+  box-shadow: 0 1px 3px 1px rgba(0, 0, 0, 0.2);
+  background-color: #f8fafc;
+}
+
+.gsi-material-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.gsi-material-button-icon {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+  .theme-surface {
+    background: #ffffff !important;
+    box-shadow: none !important;
+    border: 1px solid #cbd5e1 !important;
+    color: #000000 !important;
+  }
+}
