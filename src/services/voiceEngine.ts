@@ -1,8 +1,8 @@
-import { langSpeechMap } from '../data/themesAndLangs';
+import { langList, langSpeechMap } from '../data/themesAndLangs';
 import { VoiceState } from '../types/health';
 
 export type VoiceGender = 'female' | 'male' | 'auto';
-export type VoiceMode = 'auto' | 'online' | 'native';
+export type VoiceMode = 'auto' | 'gemini' | 'online' | 'native';
 
 const SILENT_WAV =
   'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
@@ -18,8 +18,13 @@ class VoiceEngine {
   private unlockedVoices: SpeechSynthesisVoice[] = [];
   private listeners = new Set<(state: VoiceState) => void>();
   private voiceListListeners = new Set<(voices: SpeechSynthesisVoice[]) => void>();
+  private ttsCache = new Map<string, string>();
+  private spokenTransCache = new Map<string, string>();
+  private activeRequestId = 0;
+  private geminiTtsCooldownUntil = 0;
 
   public lastSpokenText = '';
+  public lastSpokenLang = 'ur';
   public state: VoiceState = {
     active: false,
     engineLabel: 'Ready — Kisi bhi dawai par tap karein',
@@ -156,6 +161,7 @@ class VoiceEngine {
   }
 
   public stop() {
+    this.activeRequestId += 1;
     if (this.voiceWatchdog) clearTimeout(this.voiceWatchdog);
     if (this.speechKeepAlive) clearInterval(this.speechKeepAlive);
     this.voiceWatchdog = null;
@@ -242,11 +248,15 @@ class VoiceEngine {
       }
     }
     if (gender === 'female') {
-      const f = pool.find((x) => this.isFemaleVoiceName(x.name)) || v.find((x) => this.isFemaleVoiceName(x.name));
+      const f =
+        pool.find((x) => this.isFemaleVoiceName(x.name)) ||
+        v.find((x) => this.isFemaleVoiceName(x.name));
       if (f) return f;
     }
     if (gender === 'male') {
-      const m = pool.find((x) => this.isMaleVoiceName(x.name)) || v.find((x) => this.isMaleVoiceName(x.name));
+      const m =
+        pool.find((x) => this.isMaleVoiceName(x.name)) ||
+        v.find((x) => this.isMaleVoiceName(x.name));
       if (m) return m;
     }
     return pool[0] || v[0];
@@ -257,27 +267,240 @@ class VoiceEngine {
     return m[l] || (langSpeechMap[l] ? langSpeechMap[l].split('-')[0] : 'en');
   }
 
-  public playOnlineAudio(
+  private getLangName(code: string): string {
+    const found = langList.find((l) => l[0] === code);
+    return found ? found[1] : code;
+  }
+
+  private seemsAlreadyNativeScript(text: string, lang: string): boolean {
+    if (['ur_script', 'ps', 'sd', 'fa', 'ar'].includes(lang)) {
+      return /[\u0600-\u06FF]/.test(text);
+    }
+    if (['hi', 'mr', 'ne'].includes(lang)) return /[\u0900-\u097F]/.test(text);
+    if (lang === 'bn') return /[\u0980-\u09FF]/.test(text);
+    if (lang === 'pa') return /[\u0A00-\u0A7F]/.test(text);
+    if (lang === 'ta') return /[\u0B80-\u0BFF]/.test(text);
+    if (lang === 'te') return /[\u0C00-\u0C7F]/.test(text);
+    if (lang === 'gu') return /[\u0A80-\u0AFF]/.test(text);
+    if (lang === 'zh') return /[\u4E00-\u9FFF]/.test(text);
+    if (lang === 'ja') return /[\u3040-\u30FF\u4E00-\u9FFF]/.test(text);
+    if (lang === 'ko') return /[\uAC00-\uD7AF]/.test(text);
+    if (['ru', 'uk', 'kk'].includes(lang)) return /[\u0400-\u04FF]/.test(text);
+    if (lang === 'he') return /[\u0590-\u05FF]/.test(text);
+    if (lang === 'th') return /[\u0E00-\u0E7F]/.test(text);
+    if (lang === 'el') return /[\u0370-\u03FF]/.test(text);
+    if (lang === 'am') return /[\u1200-\u137F]/.test(text);
+    return false;
+  }
+
+  private async ensureLanguageText(
     text: string,
-    opts: { rate?: number; gender?: VoiceGender; lang?: string } = {}
-  ) {
-    const rate = opts.rate ?? 0.96;
-    const gender = opts.gender ?? 'female';
-    const lang = opts.lang ?? 'ur';
-    const tl = lang === 'ur' ? 'hi' : this.getGoogleTlCode(lang);
-    this.lastSpokenText = text;
-    this.voiceQueue = this.splitChunks(text, 140);
+    lang: string,
+    skipTranslate?: boolean
+  ): Promise<string> {
+    if (skipTranslate) return text;
+    if (lang === 'en') {
+      const hasUrduMarkers = /\b(karein|karen|dawai|bukhar|dard|mareez|saans|nahi|hai|hain|khane|sunein|bilkul|fori|parchi)\b/i.test(
+        text
+      );
+      if (!hasUrduMarkers && !/[^\u0000-\u007F]{3,}/.test(text)) {
+        return text;
+      }
+    }
+    if (lang === 'ur' && !/[\u0600-\u06FF]/.test(text)) {
+      if (/\b(medicine|the|and|with|take|doctor|pain|symptoms|fever|emergency|patient)\b/i.test(text) === false) {
+        return text;
+      }
+    }
+    if (this.seemsAlreadyNativeScript(text, lang)) {
+      return text;
+    }
+
+    const cacheKey = `${lang}::${text.slice(0, 450)}`;
+    const cached = this.spokenTransCache.get(cacheKey);
+    if (cached) return cached;
+
+    try {
+      const res = await fetch('/api/ai/translate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          targetLangCode: lang,
+          targetLangName: this.getLangName(lang),
+          text: text.slice(0, 1000),
+          rawOnly: true,
+        }),
+      });
+      if (res.ok) {
+        const j = (await res.json()) as { translatedText?: string };
+        if (j.translatedText?.trim()) {
+          if (this.spokenTransCache.size > 60) {
+            const first = this.spokenTransCache.keys().next().value;
+            if (first) this.spokenTransCache.delete(first);
+          }
+          this.spokenTransCache.set(cacheKey, j.translatedText.trim());
+          return j.translatedText.trim();
+        }
+      }
+    } catch {
+      // fallback below
+    }
+
+    // Fallback to Google Translate GTX for non-Roman-Urdu languages
+    if (lang !== 'ur') {
+      try {
+        const tl = this.getGoogleTlCode(lang);
+        const res = await fetch(
+          `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(
+            tl
+          )}&dt=t&q=${encodeURIComponent(text.slice(0, 600))}`
+        );
+        if (res.ok) {
+          const js = (await res.json()) as [Array<[string]>];
+          const translated = (js[0] || []).map((x) => x[0]).join('').trim();
+          if (translated) {
+            this.spokenTransCache.set(cacheKey, translated);
+            return translated;
+          }
+        }
+      } catch {
+        // return original
+      }
+    }
+
+    return text;
+  }
+
+  private async tryGeminiTts(
+    text: string,
+    opts: { rate: number; gender: VoiceGender; lang: string },
+    reqId: number
+  ): Promise<boolean> {
+    const cacheKey = `${opts.lang}::${opts.gender}::${text.slice(0, 750)}`;
+    const langDisplay = this.getLangName(opts.lang);
+
     this.state = {
       active: true,
-      engineLabel: `🌐 Online ${gender === 'male' ? 'Man' : 'Girl'} (${tl.toUpperCase()})`,
+      engineLabel: `HD AI Voice (${opts.gender === 'male' ? 'Man' : 'Girl'} · ${langDisplay})...`,
       caption: text,
       showTapPlay: false,
     };
     this.emit();
-    this.playNextOnlineChunk(tl, rate, gender, 0);
+
+    try {
+      let base64 = this.ttsCache.get(cacheKey);
+      if (!base64) {
+        const res = await fetch('/api/tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: text.slice(0, 750),
+            languageName: langDisplay,
+            gender: opts.gender,
+          }),
+        });
+        if (reqId !== this.activeRequestId) return true; // superseded by stop/new speak
+        if (!res.ok) {
+          if (res.status === 429 || res.status === 503) {
+            this.geminiTtsCooldownUntil = Date.now() + 120_000;
+          }
+          return false;
+        }
+        const json = (await res.json()) as { audioBase64?: string };
+        if (!json.audioBase64) return false;
+        base64 = json.audioBase64;
+        if (this.ttsCache.size > 35) {
+          const firstKey = this.ttsCache.keys().next().value;
+          if (firstKey) this.ttsCache.delete(firstKey);
+        }
+        this.ttsCache.set(cacheKey, base64);
+      }
+
+      if (reqId !== this.activeRequestId) return true;
+
+      const el = this.getAudioElement();
+      el.src = `data:audio/wav;base64,${base64}`;
+      el.volume = 1.0;
+      el.playbackRate = Math.min(1.35, Math.max(0.75, opts.rate));
+      el.onended = () => {
+        if (reqId !== this.activeRequestId) return;
+        this.state = {
+          active: false,
+          engineLabel: 'Finished HD Voice',
+          caption: '',
+          showTapPlay: false,
+        };
+        this.emit();
+      };
+      el.onerror = () => {
+        if (reqId !== this.activeRequestId) return;
+        this.playOnlineAudio(text, { ...opts, skipTranslate: true });
+      };
+
+      this.state = {
+        active: true,
+        engineLabel: `HD AI Voice Active (${opts.gender === 'male' ? 'Man' : 'Girl'} · ${opts.lang.toUpperCase()})`,
+        caption: text,
+        showTapPlay: false,
+      };
+      this.emit();
+
+      try {
+        await el.play();
+      } catch (err) {
+        const errName = err instanceof Error ? err.name : '';
+        if (errName === 'NotAllowedError') {
+          this.playTone(620, 0.12);
+          this.state = {
+            active: true,
+            engineLabel: 'Tap Listen to Play Audio',
+            caption: text,
+            showTapPlay: true,
+          };
+          this.emit();
+        } else {
+          return false;
+        }
+      }
+      return true;
+    } catch {
+      return false;
+    }
   }
 
-  private playNextOnlineChunk(tl: string, rate: number, gender: VoiceGender, pi: number) {
+  public async playOnlineAudio(
+    rawText: string,
+    opts: { rate?: number; gender?: VoiceGender; lang?: string; skipTranslate?: boolean } = {}
+  ) {
+    const rate = opts.rate ?? 0.96;
+    const gender = opts.gender ?? 'female';
+    const lang = opts.lang ?? 'ur';
+    const reqId = this.activeRequestId;
+    const text = await this.ensureLanguageText(rawText, lang, opts.skipTranslate);
+    if (reqId !== this.activeRequestId) return;
+
+    const tl = lang === 'ur' ? 'hi' : this.getGoogleTlCode(lang);
+    this.lastSpokenText = text;
+    this.lastSpokenLang = lang;
+    this.voiceQueue = this.splitChunks(text, 140);
+    this.state = {
+      active: true,
+      engineLabel: `Online ${gender === 'male' ? 'Man' : 'Girl'} (${tl.toUpperCase()})`,
+      caption: text,
+      showTapPlay: false,
+    };
+    this.emit();
+    this.playNextOnlineChunk(tl, rate, gender, 0, reqId);
+  }
+
+  private playNextOnlineChunk(
+    tl: string,
+    rate: number,
+    gender: VoiceGender,
+    pi: number,
+    reqId: number
+  ) {
+    if (reqId !== this.activeRequestId) return;
     if (!this.voiceQueue.length) {
       this.state = { active: false, engineLabel: 'Finished Audio', caption: '', showTapPlay: false };
       this.emit();
@@ -294,7 +517,7 @@ class VoiceEngine {
       this.playTone(580, 0.12);
       this.state = {
         active: true,
-        engineLabel: 'Audio Blocked/Offline — Tap Listen or Check Volume',
+        engineLabel: 'Tap Listen or Check Volume',
         caption: this.lastSpokenText,
         showTapPlay: true,
       };
@@ -321,33 +544,35 @@ class VoiceEngine {
             : rate;
       el.playbackRate = shapedRate;
       el.onended = () => {
+        if (reqId !== this.activeRequestId) return;
         this.voiceQueue.shift();
-        this.playNextOnlineChunk(tl, rate, gender, 0);
+        this.playNextOnlineChunk(tl, rate, gender, 0, reqId);
       };
-      el.onerror = () => this.playNextOnlineChunk(tl, rate, gender, pi + 1);
+      el.onerror = () => this.playNextOnlineChunk(tl, rate, gender, pi + 1, reqId);
       const p = el.play();
       if (p && p.catch) {
         p.catch((err: Error) => {
+          if (reqId !== this.activeRequestId) return;
           if (err?.name === 'NotAllowedError') {
             this.playTone(620, 0.12);
             this.state = {
               active: true,
-              engineLabel: 'Browser Autoplay Paused — Tap Listen',
+              engineLabel: 'Tap Listen to Play Audio',
               caption: this.lastSpokenText,
               showTapPlay: true,
             };
             this.emit();
           } else {
-            this.playNextOnlineChunk(tl, rate, gender, pi + 1);
+            this.playNextOnlineChunk(tl, rate, gender, pi + 1, reqId);
           }
         });
       }
     } catch {
-      this.playNextOnlineChunk(tl, rate, gender, pi + 1);
+      this.playNextOnlineChunk(tl, rate, gender, pi + 1, reqId);
     }
   }
 
-  public speak(
+  public async speak(
     raw: string,
     opts: {
       mode?: VoiceMode;
@@ -355,16 +580,17 @@ class VoiceEngine {
       gender?: VoiceGender;
       specificVoice?: string;
       lang?: string;
+      skipTranslate?: boolean;
     } = {}
   ) {
-    const text = String(raw || '')
+    const cleanRaw = String(raw || '')
       .replace(/[#*_`~]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
-    if (!text) return;
+    if (!cleanRaw) return;
 
     this.stop();
-    this.lastSpokenText = text;
+    const reqId = this.activeRequestId;
     this.unlockAudio();
 
     const mode = opts.mode ?? 'auto';
@@ -375,10 +601,39 @@ class VoiceEngine {
     const pitch = gender === 'female' ? 1.2 : gender === 'male' ? 0.74 : 1.0;
     const gTag = gender === 'female' ? 'Girl' : gender === 'male' ? 'Man' : 'Auto';
 
+    this.state = {
+      active: true,
+      engineLabel: `Preparing ${this.getLangName(lang)} Voice...`,
+      caption: cleanRaw,
+      showTapPlay: false,
+    };
+    this.emit();
+
+    const text = await this.ensureLanguageText(cleanRaw, lang, opts.skipTranslate);
+    if (reqId !== this.activeRequestId) return;
+
+    this.lastSpokenText = text;
+    this.lastSpokenLang = lang;
+
     if (mode === 'online') {
-      this.playOnlineAudio(text, { rate, gender, lang });
+      this.playOnlineAudio(text, { rate, gender, lang, skipTranslate: true });
       return;
     }
+
+    // In 'gemini' or 'auto' (without pinned device voice), prefer HD Gemini TTS first unless cooling down from 429!
+    if (
+      mode === 'gemini' ||
+      (mode === 'auto' && !specificVoice && Date.now() > this.geminiTtsCooldownUntil)
+    ) {
+      const ok = await this.tryGeminiTts(text, { rate, gender, lang }, reqId);
+      if (ok || reqId !== this.activeRequestId) return;
+      if (mode === 'gemini') {
+        this.playOnlineAudio(text, { rate, gender, lang, skipTranslate: true });
+        return;
+      }
+    }
+
+    if (reqId !== this.activeRequestId) return;
 
     if ('speechSynthesis' in window && typeof SpeechSynthesisUtterance !== 'undefined') {
       const tl = langSpeechMap[lang] || 'en-US';
@@ -394,6 +649,7 @@ class VoiceEngine {
       }, 8500);
 
       const next = () => {
+        if (reqId !== this.activeRequestId) return;
         if (idx >= chunks.length) {
           if (this.speechKeepAlive) clearInterval(this.speechKeepAlive);
           this.state = {
@@ -434,11 +690,12 @@ class VoiceEngine {
         };
 
         u.onend = () => {
+          if (reqId !== this.activeRequestId) return;
           const elapsed = tStart ? performance.now() - tStart : 999;
           if (idx === 0 && chText.length > 12 && elapsed < 135 && mode === 'auto') {
             if (this.voiceWatchdog) clearTimeout(this.voiceWatchdog);
             if (this.speechKeepAlive) clearInterval(this.speechKeepAlive);
-            this.playOnlineAudio(text, { rate, gender, lang });
+            this.playOnlineAudio(text, { rate, gender, lang, skipTranslate: true });
             return;
           }
           idx++;
@@ -446,10 +703,11 @@ class VoiceEngine {
         };
 
         u.onerror = () => {
+          if (reqId !== this.activeRequestId) return;
           if (this.voiceWatchdog) clearTimeout(this.voiceWatchdog);
           if (this.speechKeepAlive) clearInterval(this.speechKeepAlive);
           if (!started && mode === 'auto') {
-            this.playOnlineAudio(text, { rate, gender, lang });
+            this.playOnlineAudio(text, { rate, gender, lang, skipTranslate: true });
           } else {
             this.state = {
               active: true,
@@ -464,16 +722,16 @@ class VoiceEngine {
         if (idx === 0 && mode === 'auto') {
           if (this.voiceWatchdog) clearTimeout(this.voiceWatchdog);
           this.voiceWatchdog = setTimeout(() => {
-            if (!started) {
+            if (!started && reqId === this.activeRequestId) {
               try {
                 window.speechSynthesis.cancel();
               } catch {
                 // Ignore
               }
               if (this.speechKeepAlive) clearInterval(this.speechKeepAlive);
-              this.playOnlineAudio(text, { rate, gender, lang });
+              this.playOnlineAudio(text, { rate, gender, lang, skipTranslate: true });
             }
-          }, 950);
+          }, 550);
         }
 
         try {
@@ -482,7 +740,7 @@ class VoiceEngine {
         } catch {
           if (this.voiceWatchdog) clearTimeout(this.voiceWatchdog);
           if (this.speechKeepAlive) clearInterval(this.speechKeepAlive);
-          if (mode === 'auto') this.playOnlineAudio(text, { rate, gender, lang });
+          if (mode === 'auto') this.playOnlineAudio(text, { rate, gender, lang, skipTranslate: true });
         }
       };
 
@@ -495,7 +753,7 @@ class VoiceEngine {
       this.emit();
       next();
     } else {
-      this.playOnlineAudio(text, { rate, gender, lang });
+      this.playOnlineAudio(text, { rate, gender, lang, skipTranslate: true });
     }
   }
 }

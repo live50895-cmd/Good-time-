@@ -776,7 +776,7 @@ export function decodeParchiAndLabs(raw: string): {
   };
 
   const checks: Array<[string, number | null, (v: number) => string]> = [
-    ['Hb (Hemoglobin)', grab(/(?:hb|hemoglobin|hgb)[\s:=]*([0-9.]+)/i), (v) => (v < 11.5 ? '🔴 Low (Anemia/Khoon ki kami) — Iron+Folic & diet check.' : '🟢 Normal.')],
+    ['Hb (Hemoglobin)', grab(/(?:hb|hemoglobin|hgb)[\s:=]*([0-9.]+)/i), (v) => (v < 11.5 ? '🔴 Low (Anemia/Khoon ki kami) — Iron+Folic & diet check.' : v > 17.5 ? '🟡 High Hb — Hydration & doctor check.' : '🟢 Normal.')],
     [
       'Platelets (PLT)',
       grab(/(?:platelets?|plt)[\s:=]*([0-9.]+)/i),
@@ -786,7 +786,9 @@ export function decodeParchiAndLabs(raw: string): {
           ? `🔴 ${n.toLocaleString()} CRITICALLY LOW! Urgent Hospital!`
           : n < 150000
             ? `🟡 ${n.toLocaleString()} Low (Dengue watch — Brufen/Disprin MANA!).`
-            : `🟢 ${n.toLocaleString()} Normal.`;
+            : n > 450000
+              ? `🟡 ${n.toLocaleString()} Elevated (Thrombocytosis — doctor check).`
+              : `🟢 ${n.toLocaleString()} Normal.`;
       },
     ],
     [
@@ -794,17 +796,61 @@ export function decodeParchiAndLabs(raw: string): {
       grab(/(?:wbc|tlc)[\s:=]*([0-9.]+)/i),
       (v) => {
         const n = v < 50 ? v * 1000 : v;
-        return n > 11000 ? `🟡 ${n.toLocaleString()} High (Infection/Soojan).` : `🟢 ${n.toLocaleString()} Normal.`;
+        return n > 11000 ? `🟡 ${n.toLocaleString()} High (Infection/Soojan).` : n < 4000 ? `🟡 ${n.toLocaleString()} Low WBC (Viral/Immunity check).` : `🟢 ${n.toLocaleString()} Normal.`;
       },
     ],
-    ['Blood Sugar (FBS/RBS)', grab(/(?:fbs|rbs|sugar|glucose)[\s:=]*([0-9.]+)/i), (v) => (v < 70 ? '🔴 Low Sugar (<70)! Urgent juice/sugar.' : v >= 126 ? '🟡 High Sugar — Diet, walk & doctor check.' : '🟢 Normal.')],
-    ['HbA1c', grab(/(?:hba1c|a1c)[\s:=]*([0-9.]+)/i), (v) => (v >= 6.5 ? '🔴 Diabetes range (6.5%+).' : v >= 5.7 ? '🟡 Prediabetes borderline.' : '🟢 Normal (<5.7%).')],
-    ['Creatinine (Kidney)', grab(/(?:creatinine|creat|cr)[\s:=]*([0-9.]+)/i), (v) => (v > 1.3 ? '🔴 High (Kidney strain — Brufen/Ponstan MANA!).' : '🟢 Normal.')],
-    ['ALT / SGPT (Liver)', grab(/(?:alt|sgpt)[\s:=]*([0-9.]+)/i), (v) => (v > 45 ? '🟡 High (Fatty liver / Hepatitis LFT check).' : '🟢 Normal.')],
-    ['TSH (Thyroid)', grab(/(?:tsh)[\s:=]*([0-9.]+)/i), (v) => (v > 4.5 ? '🟡 High (Hypothyroid — Thyrox check).' : v < 0.4 ? '🟡 Low (Hyperthyroid).' : '🟢 Normal.')],
-    ['Uric Acid', grab(/(?:uric\s*acid|uric)[\s:=]*([0-9.]+)/i), (v) => (v > 7.0 ? '🟡 High (Jodon dard/Gout — 3L pani, beef kam).' : '🟢 Normal.')],
-    ['Cholesterol', grab(/(?:cholesterol|chol)[\s:=]*([0-9.]+)/i), (v) => (v >= 200 ? '🟡 High (Chiknai kam & walk).' : '🟢 Normal (<200).')],
-    ['Vitamin D', grab(/(?:vit\s*d|vitamin\s*d)[\s:=]*([0-9.]+)/i), (v) => (v < 30 ? '🟡 Low (Dhoop + Vit D3 per doctor).' : '🟢 Normal.')],
+    ['RBC Count', grab(/(?:rbc)[\s:=]*([0-9.]+)/i), (v) => (v < 4.0 ? '🟡 Low RBC.' : v > 6.1 ? '🟡 High RBC.' : '🟢 Normal.')],
+    ['Hematocrit / PCV', grab(/(?:hct|pcv|hematocrit)[\s:=]*([0-9.]+)/i), (v) => (v < 36 ? '🟡 Low PCV/Anemia.' : v > 52 ? '🔴 High PCV (Dengue hemoconcentration watch!).' : '🟢 Normal.')],
+    ['MCV', grab(/(?:mcv)[\s:=]*([0-9.]+)/i), (v) => (v < 80 ? '🟡 Low MCV (Microcytic — Iron/Thalassemia check).' : v > 100 ? '🟡 High MCV (B12/Folate check).' : '🟢 Normal (80–100 fL).')],
+    ['MCH', grab(/(?:mch)(?!c)[\s:=]*([0-9.]+)/i), (v) => (v < 27 || v > 33 ? '🟡 Borderline MCH.' : '🟢 Normal.')],
+    ['MCHC', grab(/(?:mchc)[\s:=]*([0-9.]+)/i), (v) => (v < 32 || v > 36 ? '🟡 Borderline MCHC.' : '🟢 Normal.')],
+    ['RDW', grab(/(?:rdw)[\s:=]*([0-9.]+)/i), (v) => (v > 14.5 ? '🟡 High RDW (Mixed anemia indicator).' : '🟢 Normal.')],
+    ['Neutrophils %', grab(/(?:neutrophils?|neut|polymorphs)[\s:=]*([0-9.]+)/i), (v) => (v > 75 ? '🟡 High Neutrophils (Bacterial infection watch).' : v < 40 ? '🟡 Low Neutrophils.' : '🟢 Normal.')],
+    ['Lymphocytes %', grab(/(?:lymphocytes?|lymph)[\s:=]*([0-9.]+)/i), (v) => (v > 45 ? '🟡 High Lymphocytes (Viral watch).' : v < 20 ? '🟡 Low Lymphocytes.' : '🟢 Normal.')],
+    ['Monocytes %', grab(/(?:monocytes?|mono)[\s:=]*([0-9.]+)/i), (v) => (v > 10 ? '🟡 Elevated Monocytes.' : '🟢 Normal.')],
+    ['Eosinophils %', grab(/(?:eosinophils?|eos)[\s:=]*([0-9.]+)/i), (v) => (v > 6 ? '🟡 High Eosinophils (Allergy/Asthma/Worm check).' : '🟢 Normal.')],
+    ['ESR', grab(/(?:esr)[\s:=]*([0-9.]+)/i), (v) => (v > 25 ? '🟡 Elevated ESR (Inflammation/Infection check).' : '🟢 Normal.')],
+    ['CRP (C-Reactive)', grab(/(?:crp)[\s:=]*([0-9.]+)/i), (v) => (v > 10 ? '🔴 High CRP (Active Inflammation/Infection!).' : v > 5 ? '🟡 Mild CRP.' : '🟢 Normal.')],
+    ['D-Dimer', grab(/(?:d-?dimer)[\s:=]*([0-9.]+)/i), (v) => (v > 500 || (v > 0.5 && v < 10) ? '🔴 Elevated D-Dimer — Clot/Doctor urgent check!' : '🟢 Normal.')],
+    ['Ferritin', grab(/(?:ferritin)[\s:=]*([0-9.]+)/i), (v) => (v < 20 ? '🟡 Low Ferritin (Iron stores low).' : v > 400 ? '🟡 High Ferritin (Inflammation).' : '🟢 Normal.')],
+    ['Serum Iron', grab(/(?:serum\s*iron|\biron\b)[\s:=]*([0-9.]+)/i), (v) => (v < 50 ? '🟡 Low Serum Iron.' : v > 175 ? '🟡 High Iron.' : '🟢 Normal.')],
+    ['Fasting Sugar (FBS)', grab(/(?:fbs|fasting\s*sugar|fasting\s*glucose)[\s:=]*([0-9.]+)/i), (v) => (v < 70 ? '🔴 LOW SUGAR (<70)! Urgent juice/glucose!' : v >= 126 ? '🔴 High Fasting Sugar (Diabetes range).' : v >= 100 ? '🟡 Borderline Prediabetes.' : '🟢 Normal (70–99).')],
+    ['Random Sugar (RBS/Sugar)', grab(/(?:rbs|random\s*sugar|blood\s*sugar|sugar|glucose)[\s:=]*([0-9.]+)/i), (v) => (v < 70 ? '🔴 LOW SUGAR (<70)! Urgent sugar/juice!' : v >= 200 ? '🔴 High Random Sugar (Doctor & diet check).' : v >= 140 ? '🟡 Elevated after meal.' : '🟢 Normal.')],
+    ['HbA1c (3-Month Sugar)', grab(/(?:hba1c|a1c)[\s:=]*([0-9.]+)/i), (v) => (v >= 6.5 ? '🔴 Diabetes range (6.5%+).' : v >= 5.7 ? '🟡 Prediabetes borderline.' : '🟢 Normal (<5.7%).')],
+    ['Systolic BP (Upper)', grab(/(?:bp|sys|systolic)[\s:=]*([0-9]{2,3})/i), (v) => (v >= 180 ? '🔴 CRISIS HIGH BP (>=180)! Hospital Urgent!' : v >= 140 ? '🟡 High BP (Hypertension — check medication & low salt).' : v < 90 ? '🔴 Low BP (<90) — Hydration & doctor check!' : '🟢 Normal (<130).')],
+    ['Diastolic BP (Lower)', grab(/(?:bp[\s:=]*[0-9]{2,3}\s*\/|dia|diastolic[\s:=]*)([0-9]{2,3})/i), (v) => (v >= 120 ? '🔴 CRISIS DIASTOLIC BP! Urgent ER!' : v >= 90 ? '🟡 High Lower BP (>=90).' : v < 60 ? '🟡 Low Diastolic BP (<60).' : '🟢 Normal (<85).')],
+    ['Oxygen (SpO2 %)', grab(/(?:spo2|o2|oxygen)[\s:=]*([0-9.]+)/i), (v) => (v < 90 ? '🔴 CRITICALLY LOW OXYGEN (<90%)! Urgent Hospital!' : v < 95 ? '🟡 Low SpO2 (90–94% — breathing check).' : '🟢 Normal (95–100%).')],
+    ['Pulse / Heart Rate', grab(/(?:pulse|hr|heart\s*rate)[\s:=]*([0-9.]+)/i), (v) => (v > 110 ? '🟡 Fast Pulse (Tachycardia — fever/anxiety/heart check).' : v < 50 ? '🟡 Slow Pulse (<50 — ECG check).' : '🟢 Normal (60–100 bpm).')],
+    ['Temperature (°F)', grab(/(?:temp|fever|temperature)[\s:=]*([0-9.]+)/i), (v) => (v >= 103 ? '🔴 High Fever (>=103°F)! Sponging & urgent doctor!' : v >= 100.4 ? '🟡 Fever detected.' : '🟢 Normal (~98.6°F).')],
+    ['Creatinine (Kidney)', grab(/(?:creatinine|creat|cr)[\s:=]*([0-9.]+)/i), (v) => (v > 1.3 ? '🔴 High Creatinine (Kidney strain — Brufen/Ponstan MANA!).' : '🟢 Normal (0.6–1.3).')],
+    ['Blood Urea / BUN', grab(/(?:urea|bun)[\s:=]*([0-9.]+)/i), (v) => (v > 45 ? '🟡 High Urea — Kidney & hydration check.' : '🟢 Normal.')],
+    ['eGFR (Kidney Filter)', grab(/(?:egfr|gfr)[\s:=]*([0-9.]+)/i), (v) => (v < 60 ? '🔴 Low eGFR (<60 — Nephrologist check).' : '🟢 Normal (>=90 optimal).')],
+    ['ALT / SGPT (Liver)', grab(/(?:alt|sgpt)[\s:=]*([0-9.]+)/i), (v) => (v > 45 ? '🟡 High ALT (Fatty liver / Hepatitis LFT check).' : '🟢 Normal (7–45).')],
+    ['AST / SGOT (Liver)', grab(/(?:ast|sgot)[\s:=]*([0-9.]+)/i), (v) => (v > 40 ? '🟡 Elevated AST (Liver/Muscle check).' : '🟢 Normal.')],
+    ['Bilirubin Total', grab(/(?:bilirubin|bili)[\s:=]*([0-9.]+)/i), (v) => (v > 1.2 ? '🟡 High Bilirubin (Jaundice / Piliya check).' : '🟢 Normal (<1.2).')],
+    ['Alkaline Phosphatase (ALP)', grab(/(?:alp|alk\s*phos)[\s:=]*([0-9.]+)/i), (v) => (v > 147 ? '🟡 Elevated ALP (Gallbladder/Bone check).' : '🟢 Normal.')],
+    ['GGT', grab(/(?:ggt)[\s:=]*([0-9.]+)/i), (v) => (v > 60 ? '🟡 High GGT (Liver/Bile check).' : '🟢 Normal.')],
+    ['Serum Albumin', grab(/(?:albumin)[\s:=]*([0-9.]+)/i), (v) => (v < 3.4 ? '🟡 Low Albumin (Liver/Protein nutrition check).' : '🟢 Normal (3.5–5.2).')],
+    ['Amylase / Lipase', grab(/(?:amylase|lipase)[\s:=]*([0-9.]+)/i), (v) => (v > 140 ? '🔴 Elevated Pancreatic Enzyme — Urgent Doctor!' : '🟢 Normal.')],
+    ['TSH (Thyroid)', grab(/(?:tsh)[\s:=]*([0-9.]+)/i), (v) => (v > 4.5 ? '🟡 High TSH (Hypothyroid — Thyrox check).' : v < 0.4 ? '🟡 Low TSH (Hyperthyroid).' : '🟢 Normal (0.4–4.5).')],
+    ['Free T4 (FT4)', grab(/(?:ft4|free\s*t4)[\s:=]*([0-9.]+)/i), (v) => (v < 0.8 || v > 1.8 ? '🟡 Abnormal FT4 (Thyroid follow-up).' : '🟢 Normal.')],
+    ['Free T3 (FT3)', grab(/(?:ft3|free\s*t3)[\s:=]*([0-9.]+)/i), (v) => (v < 2.0 || v > 4.4 ? '🟡 Abnormal FT3.' : '🟢 Normal.')],
+    ['Uric Acid', grab(/(?:uric\s*acid|uric)[\s:=]*([0-9.]+)/i), (v) => (v > 7.0 ? '🟡 High Uric Acid (Jodon dard/Gout — 3L pani, beef kam).' : '🟢 Normal.')],
+    ['Total Cholesterol', grab(/(?:cholesterol|chol)[\s:=]*([0-9.]+)/i), (v) => (v >= 200 ? '🟡 High Cholesterol (Chiknai kam & walk).' : '🟢 Normal (<200).')],
+    ['Triglycerides (TG)', grab(/(?:triglycerides?|tg|trigs)[\s:=]*([0-9.]+)/i), (v) => (v >= 150 ? '🟡 High Triglycerides (Sugar/Fried kam karein).' : '🟢 Normal (<150).')],
+    ['LDL (Bad Chol)', grab(/(?:ldl)[\s:=]*([0-9.]+)/i), (v) => (v >= 130 ? '🟡 High LDL Cholesterol.' : '🟢 Optimal (<100–130).')],
+    ['HDL (Good Chol)', grab(/(?:hdl)[\s:=]*([0-9.]+)/i), (v) => (v < 40 ? '🟡 Low HDL (Walk & olive/fish diet helpful).' : '🟢 Good Healthy HDL.')],
+    ['Sodium (Na+)', grab(/(?:sodium|\bna\b)[\s:=]*([0-9.]+)/i), (v) => (v < 135 ? '🔴 Low Sodium (Weakness/Chakkar — Doctor check!).' : v > 145 ? '🔴 High Sodium.' : '🟢 Normal (135–145).')],
+    ['Potassium (K+)', grab(/(?:potassium|\bk\b)[\s:=]*([0-9.]+)/i), (v) => (v > 5.2 ? '🔴 HIGH POTASSIUM (>5.2) — Heart/Kidney Urgent!' : v < 3.5 ? '🟡 Low Potassium (<3.5 — Weakness).' : '🟢 Normal (3.5–5.1).')],
+    ['Calcium (Ca)', grab(/(?:calcium|\bca\b)[\s:=]*([0-9.]+)/i), (v) => (v < 8.5 ? '🟡 Low Calcium.' : v > 10.5 ? '🟡 High Calcium.' : '🟢 Normal (8.6–10.2).')],
+    ['Magnesium (Mg)', grab(/(?:magnesium|\bmg\b)[\s:=]*([0-9.]+)/i), (v) => (v < 1.7 ? '🟡 Low Magnesium (Cramps check).' : '🟢 Normal.')],
+    ['Vitamin D (25-OH)', grab(/(?:vit\s*d|vitamin\s*d|25oh)[\s:=]*([0-9.]+)/i), (v) => (v < 20 ? '🔴 Deficient Vit D (<20 — Bone/Fatigue).' : v < 30 ? '🟡 Insufficient Vit D (Dhoop + Vit D3 per doctor).' : '🟢 Sufficient (30–100).')],
+    ['Vitamin B12', grab(/(?:vit\s*b12|vitamin\s*b12|b12)[\s:=]*([0-9.]+)/i), (v) => (v < 200 ? '🟡 Low B12 (Sunn pan / Nerve fatigue check).' : '🟢 Normal.')],
+    ['Troponin I', grab(/(?:troponin|trop)[\s:=]*([0-9.]+)/i), (v) => (v > 0.04 ? '🔴 ELEVATED TROPONIN — URGENT CARDIAC EMERGENCY!' : '🟢 Normal.')],
+    ['Ejection Fraction (EF %)', grab(/(?:ef|lvef|ejection\s*fraction)[\s:=]*([0-9.]+)/i), (v) => (v < 45 ? '🔴 Reduced Heart EF% — Cardiologist urgent care!' : v < 55 ? '🟡 Mildly reduced EF%.' : '🟢 Normal (55–70%).')],
+    ['PSA (Prostate)', grab(/(?:psa)[\s:=]*([0-9.]+)/i), (v) => (v > 4.0 ? '🟡 Elevated PSA (Urologist check).' : '🟢 Normal (<4.0).')],
+    ['Urine Pus Cells', grab(/(?:pus\s*cells?)[\s:=]*([0-9.]+)/i), (v) => (v > 5 ? '🟡 Elevated Pus Cells (UTI / Infection — pani zyada & doctor culture).' : '🟢 Normal (0–4/HPF).')],
+    ['Fetal Heart Rate (FHR)', grab(/(?:fhr|fetal\s*heart)[\s:=]*([0-9.]+)/i), (v) => (v < 110 || v > 160 ? '🔴 Abnormal Baby Heart Rate — Urgent Gynecology check!' : '🟢 Normal (110–160 bpm).')],
   ];
 
   checks.forEach(([lbl, val, fn]) => {
@@ -812,6 +858,27 @@ export function decodeParchiAndLabs(raw: string): {
       const r = fn(val);
       lines.push(`${lbl} (${val}): ${r}`);
       sp.push(`${lbl} ${val}: ${r.replace(/[🔴🟡🟢]/g, '')}`);
+    }
+  });
+
+  // Qualitative X-Ray / Ultrasound / Infectious Markers (completing 100+ real clinical checks)
+  const qualitativeChecks: Array<[RegExp, string]> = [
+    [/dengue\s*ns1\s*pos|ns1\s*reactive|\+\s*ns1/i, '🔴 Dengue NS1 Positive! Platelets check har roz, ORS/pani zyada, Brufen/Disprin MANA!'],
+    [/typhidot|widal\s*pos/i, '🟡 Typhoid marker positive — Complete doctor prescribed antibiotic course & clean boiled water.'],
+    [/h\.\s*pylori\s*pos|pylori\s*reactive/i, '🟡 H. Pylori stomach bacteria positive — Triple therapy/PPI per gastroenterologist.'],
+    [/hbsag\s*pos|hepatitis\s*b/i, '🔴 Hepatitis B marker noted — Liver specialist & family vaccination check.'],
+    [/anti-?hcv\s*pos|hepatitis\s*c/i, '🔴 Hepatitis C marker noted — PCR viral load & Hepatologist consultation.'],
+    [/fatty\s*liver/i, '🟡 Ultrasound: Fatty Liver — Sugar/Oil/Maida band, daily 30-min walk & LFT check.'],
+    [/kidney\s*stone|renal\s*calculus|nephrolithiasis/i, '🟡 Ultrasound/X-Ray: Kidney Stone — Drink 3L water; if severe flank pain/fever see Urologist.'],
+    [/gall\s*stone|cholelithiasis/i, '🟡 Ultrasound: Gallbladder Stone (Pitta) — Avoid oily/fried food; surgeon consultation.'],
+    [/pleural\s*effusion|pneumonia|consolidation/i, '🔴 Chest X-Ray finding (Fluid/Pneumonia) — Prompt Chest Physician examination required.'],
+    [/fracture|dislocation/i, '🔴 Bone X-Ray: Possible Fracture — Immobilize joint & visit Orthopedic emergency immediately.'],
+    [/cardiomegaly/i, '🔴 Chest X-Ray: Enlarged heart shadow — Cardiology & Echo evaluation advised.'],
+  ];
+  qualitativeChecks.forEach(([rx, msg]) => {
+    if (rx.test(q)) {
+      lines.push(msg);
+      sp.push(msg.replace(/[🔴🟡🟢]/g, ''));
     }
   });
 
@@ -824,6 +891,10 @@ export function decodeParchiAndLabs(raw: string): {
     [/\bsos\b/, 'SOS = Sirf zaroorat par (e.g. bukhar/dard)'],
     [/\bac\b/, 'AC = Khane se PEHLE (khali pet)'],
     [/\bpc\b/, 'PC = Khane ke BAAD'],
+    [/\bstat\b/, 'STAT = Fori pehli dose abhi dein'],
+    [/\bim\b/, 'IM = Muscle mein injection'],
+    [/\biv\b/, 'IV = Vein / Drip mein'],
+    [/\bpo\b/, 'PO = Munh se khane ki dawai'],
   ];
   const foundAbbr = abbrs.filter(([rx]) => rx.test(q)).map(([, t]) => t);
   if (foundAbbr.length > 0) {
@@ -839,16 +910,16 @@ export function decodeParchiAndLabs(raw: string): {
   );
   if (foundMeds.length > 0) {
     lines.push(
-      `💊 Matched Medicines:\n${foundMeds.map((m) => `• ${m.name}: ${m.dose}`).join('\n')}`
+      `💊 Matched Medicines:\n${foundMeds.map((m) => `• ${m.name}: ${m.dose} — ${m.use}`).join('\n')}`
     );
-    sp.push(foundMeds.map((m) => `${m.name}: ${m.dose}`).join('. '));
+    sp.push(foundMeds.map((m) => `${m.name}: ${m.dose}. ${m.use}`).join('. '));
   }
 
   if (lines.length === 0) {
     lines.push(
-      'Specific lab numbers (Hb, Sugar, Creatinine, PLT) ya Parchi codes (OD, BD, TDS, Risek, Augmentin) likhein.'
+      '100+ checks ready: Lab values (Hb, Sugar, BP, SpO2, PLT, Creatinine, LFT, TSH, Vit D, PSA), X-Ray/Ultrasound terms, ya Parchi codes (OD, BD, TDS, Risek, Augmentin) likhein.'
     );
-    sp.push('Specific lab numbers ya medicine likhein.');
+    sp.push('Lab numbers, X-ray, ultrasound ya dawai ka naam likhein.');
   }
 
   return { lines, spokenText: sp.join('. ') };

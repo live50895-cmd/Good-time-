@@ -3,6 +3,7 @@ import {
   BellPlus,
   Calculator,
   Globe,
+  Languages,
   MapPin,
   Volume2,
   Square,
@@ -16,9 +17,15 @@ import {
   medicinesData,
   ramadanPlans,
 } from '../data/healthData';
-import { I18nStrings, langSpeechMap } from '../data/themesAndLangs';
+import { I18nStrings, langList, langSpeechMap } from '../data/themesAndLangs';
 import { voiceEngine, VoiceGender, VoiceMode } from '../services/voiceEngine';
-import { MedicineItem, VoiceState } from '../types/health';
+import {
+  GroundedSource,
+  MedicineItem,
+  NearbyCareResult,
+  OnlineSearchResult,
+  VoiceState,
+} from '../types/health';
 import { readStorageJson, writeStorageJson } from '../utils/qrAndStorage';
 
 interface ClinicalToolsAndGuidesProps {
@@ -37,7 +44,7 @@ interface ClinicalToolsAndGuidesProps {
   setVoiceSpeed: (s: number) => void;
   autoSpeakAi: boolean;
   setAutoSpeakAi: (v: boolean) => void;
-  onSpeak: (txt: string) => void;
+  onSpeak: (txt: string, skipTranslate?: boolean) => void;
   onForceOnline: (txt: string) => void;
   onStopVoice: () => void;
   onAddRamadanAlarms: () => void;
@@ -109,9 +116,21 @@ export const ClinicalToolsAndGuides: React.FC<ClinicalToolsAndGuidesProps> = ({
   const [deviceVoices, setDeviceVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [activeMedIdx, setActiveMedIdx] = useState<number | null>(null);
   const [transCache, setTransCache] = useState<Record<string, MedicineItem>>(() =>
-    readStorageJson<Record<string, MedicineItem>>('noor_trans_cache_v2', {})
+    readStorageJson<Record<string, MedicineItem>>('noor_trans_cache_v3', {})
   );
   const [medTransStatus, setMedTransStatus] = useState<string>('Ready');
+
+  // Voice Quick-Speak & Super Google Translator States
+  const [quickSpeakText, setQuickSpeakText] = useState<string>('');
+  const [superTransInput, setSuperTransInput] = useState<string>('');
+  const [superTransLang, setSuperTransLang] = useState<string>(currentLang);
+  const [superTransBusy, setSuperTransBusy] = useState<boolean>(false);
+  const [superTransOut, setSuperTransOut] = useState<{
+    translatedText: string;
+    medicineNameInLang: string;
+    usageAndDose: string;
+    speakText: string;
+  } | null>(null);
 
   const [ramadanKey, setRamadanKey] = useState<string>('diabetes');
   const [dietKey, setDietKey] = useState<string>('sugar');
@@ -145,12 +164,14 @@ export const ClinicalToolsAndGuides: React.FC<ClinicalToolsAndGuidesProps> = ({
   const [worldInput, setWorldInput] = useState<string>('');
   const [worldBusy, setWorldBusy] = useState<boolean>(false);
   const [worldResults, setWorldResults] = useState<{
-    wiki?: string;
-    fda?: string;
-    pubmed?: string;
+    structured?: OnlineSearchResult;
+    sources?: GroundedSource[];
     localMed?: string;
     spoken?: string;
+    skipTranslate?: boolean;
   } | null>(null);
+  const [nearbyQuickOut, setNearbyQuickOut] = useState<NearbyCareResult | null>(null);
+  const [nearbyQuickBusy, setNearbyQuickBusy] = useState<boolean>(false);
 
   useEffect(() => {
     return voiceEngine.subscribeVoices((list) => {
@@ -158,24 +179,84 @@ export const ClinicalToolsAndGuides: React.FC<ClinicalToolsAndGuidesProps> = ({
     });
   }, []);
 
-  // Auto-translate medicines when language changes
   useEffect(() => {
-    let cancelled = false;
-    const translate = async () => {
-      if (currentLang === 'en') {
-        setMedTransStatus('English Active');
-        return;
+    setSuperTransLang(currentLang);
+  }, [currentLang]);
+
+  // Super Google Translation batch translator for all 66 medicines when language changes
+  const runBatchMedicineTranslation = async (forceRefresh = false) => {
+    if (currentLang === 'en') {
+      setMedTransStatus('English Active');
+      return;
+    }
+    if (
+      !forceRefresh &&
+      transCache[`${currentLang}::med_0`] &&
+      transCache[`${currentLang}::med_60`]
+    ) {
+      const langTuple = langList.find((l) => l[0] === currentLang);
+      setMedTransStatus(`Translated: ${langTuple ? langTuple[1] : currentLang.toUpperCase()}`);
+      return;
+    }
+
+    const langTuple = langList.find((l) => l[0] === currentLang);
+    const targetLangName = langTuple ? langTuple[1] : currentLang;
+    setMedTransStatus(`Translating 66 Meds (${currentLang.toUpperCase()})...`);
+
+    const updated = { ...transCache };
+    let usedSuperBackend = false;
+
+    try {
+      // Translate in 3 batches of 22 via Gemini Super Translator
+      const batchSize = 22;
+      const chunks: Array<{ start: number; items: MedicineItem[] }> = [];
+      for (let b = 0; b < medicinesData.length; b += batchSize) {
+        chunks.push({ start: b, items: medicinesData.slice(b, b + batchSize) });
       }
-      if (transCache[`${currentLang}::med_0`] && transCache[`${currentLang}::med_50`]) {
-        setMedTransStatus(`✅ ${currentLang.toUpperCase()}`);
-        return;
-      }
+
+      const results = await Promise.all(
+        chunks.map(async ({ start, items }) => {
+          const res = await fetch('/api/ai/translate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              targetLangCode: currentLang,
+              targetLangName,
+              items: items.map((m) => ({
+                name: m.name,
+                dose: m.dose,
+                use: m.use,
+                warn: m.warn,
+              })),
+            }),
+          });
+          if (!res.ok) throw new Error('Backend translate unavailable');
+          const json = (await res.json()) as {
+            items?: Array<{ name: string; dose: string; use: string; warn: string }>;
+          };
+          return { start, translated: json.items || [] };
+        })
+      );
+
+      results.forEach(({ start, translated }) => {
+        translated.forEach((tr, ri) => {
+          const orig = medicinesData[start + ri];
+          if (!orig) return;
+          updated[`${currentLang}::med_${start + ri}`] = {
+            ...orig,
+            name: tr.name || orig.name,
+            dose: tr.dose || orig.dose,
+            use: tr.use || orig.use,
+            warn: tr.warn || orig.warn,
+          };
+        });
+      });
+      usedSuperBackend = true;
+    } catch {
+      // Fallback to public Google Translate REST if offline or server key missing
       const tl = currentLang === 'ur' ? 'hi' : getGoogleTlCode(currentLang);
-      setMedTransStatus('Translating...');
       try {
-        const updated = { ...transCache };
         for (let b = 0; b < medicinesData.length; b += 12) {
-          if (cancelled) return;
           const sl = medicinesData.slice(b, b + 12);
           const joined = sl.map((m) => `${m.name} ||| ${m.dose} ||| ${m.use} ||| ${m.warn}`).join('\n@@\n');
           const res = await fetch(
@@ -201,21 +282,106 @@ export const ClinicalToolsAndGuides: React.FC<ClinicalToolsAndGuidesProps> = ({
             }
           });
         }
-        if (!cancelled) {
-          setTransCache(updated);
-          writeStorageJson('noor_trans_cache_v2', updated);
-          setMedTransStatus(`✅ ${currentLang.toUpperCase()}`);
-        }
       } catch {
-        if (!cancelled) setMedTransStatus('Offline Mode');
+        setMedTransStatus('Offline Mode');
+        return;
       }
-    };
-    translate();
-    return () => {
-      cancelled = true;
-    };
+    }
+
+    setTransCache(updated);
+    writeStorageJson('noor_trans_cache_v3', updated);
+    setMedTransStatus(
+      usedSuperBackend
+        ? `Super Translated (${targetLangName})`
+        : `Google Translated (${currentLang.toUpperCase()})`
+    );
+  };
+
+  useEffect(() => {
+    runBatchMedicineTranslation(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentLang]);
+
+  const runSuperTranslator = async (overrideText?: string) => {
+    const q = (overrideText ?? superTransInput).trim();
+    if (!q) {
+      onNotify('Dawai ka naam ya koi jumla likhein translate karne ke liye.', 'error');
+      return;
+    }
+    if (overrideText) setSuperTransInput(overrideText);
+
+    const targetTuple = langList.find((l) => l[0] === superTransLang);
+    const targetName = targetTuple ? targetTuple[1] : superTransLang;
+
+    setSuperTransBusy(true);
+    try {
+      const res = await fetch('/api/ai/translate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: q,
+          targetLangCode: superTransLang,
+          targetLangName: targetName,
+        }),
+      });
+      if (res.ok) {
+        const json = (await res.json()) as {
+          result?: {
+            translatedText: string;
+            medicineNameInLang: string;
+            usageAndDose: string;
+            speakText: string;
+          };
+        };
+        if (json.result) {
+          setSuperTransOut(json.result);
+          voiceEngine.speak(json.result.speakText, {
+            mode: voiceMode,
+            rate: voiceSpeed,
+            gender: voiceGender,
+            specificVoice,
+            lang: superTransLang,
+            skipTranslate: true,
+          });
+          setSuperTransBusy(false);
+          return;
+        }
+      }
+    } catch {
+      // fall through to Google Translate REST fallback
+    }
+
+    try {
+      const tl = getGoogleTlCode(superTransLang);
+      const r = await fetch(
+        `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(
+          tl
+        )}&dt=t&q=${encodeURIComponent(q)}`
+      );
+      if (r.ok) {
+        const js = (await r.json()) as [Array<[string]>];
+        const tr = (js[0] || []).map((x) => x[0]).join('');
+        const out = {
+          translatedText: tr,
+          medicineNameInLang: tr,
+          usageAndDose: `Translated via Google (${targetName})`,
+          speakText: tr,
+        };
+        setSuperTransOut(out);
+        voiceEngine.speak(tr, {
+          mode: voiceMode,
+          rate: voiceSpeed,
+          gender: voiceGender,
+          specificVoice,
+          lang: superTransLang,
+        });
+      }
+    } catch {
+      onNotify('Translation service unavailable right now.', 'error');
+    } finally {
+      setSuperTransBusy(false);
+    }
+  };
 
   const getLocalizedMed = (idx: number): MedicineItem => {
     const m = medicinesData[idx];
@@ -288,89 +454,147 @@ export const ClinicalToolsAndGuides: React.FC<ClinicalToolsAndGuidesProps> = ({
       : `https://www.google.com/maps/search/${encoded}`;
   };
 
+  const speakNearbyPlaces = async () => {
+    setNearbyQuickBusy(true);
+    const langTuple = langList.find((l) => l[0] === currentLang);
+    const langDisplayName = langTuple ? langTuple[1] : 'English';
+    const callBackend = async (lat?: number, lng?: number, city?: string) => {
+      try {
+        const res = await fetch('/api/ai/nearby-care', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            lat,
+            lng,
+            cityQuery: city,
+            category: 'all',
+            targetLangCode: currentLang,
+            targetLangName: langDisplayName,
+          }),
+        });
+        const json = (await res.json().catch(() => ({}))) as NearbyCareResult & {
+          offlineFallback?: boolean;
+        };
+        if (res.ok && json.summary) {
+          setNearbyQuickOut(json);
+          onSpeak(json.speakSummary || json.summary, !json.offlineFallback);
+          onNotify('Nearby Hospitals, Medical Stores & Labs spoken!', 'success');
+        }
+      } catch {
+        onNotify('GPS Maps links are ready below.', 'info');
+      } finally {
+        setNearbyQuickBusy(false);
+      }
+    };
+
+    const resolveViaIp = async () => {
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 3000);
+        const r = await fetch('https://ipwho.is/', { signal: ctrl.signal });
+        clearTimeout(t);
+        if (r.ok) {
+          const ip = (await r.json()) as {
+            success?: boolean;
+            city?: string;
+            country?: string;
+            latitude?: number;
+            longitude?: number;
+          };
+          if (ip.success && typeof ip.latitude === 'number' && typeof ip.longitude === 'number') {
+            setGpsCoords({ lat: ip.latitude.toFixed(5), lng: ip.longitude.toFixed(5) });
+            setGpsStatus(`📡 Detected Area: ${ip.city || ''}, ${ip.country || ''}`);
+            await callBackend(ip.latitude, ip.longitude, [ip.city, ip.country].filter(Boolean).join(', '));
+            return;
+          }
+        }
+      } catch {
+        // ignore
+      }
+      await callBackend(undefined, undefined, 'Lahore Pakistan');
+    };
+
+    if (gpsCoords) {
+      await callBackend(parseFloat(gpsCoords.lat), parseFloat(gpsCoords.lng));
+      return;
+    }
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const lat = pos.coords.latitude.toFixed(5);
+          const lng = pos.coords.longitude.toFixed(5);
+          setGpsCoords({ lat, lng });
+          setGpsStatus(`✅ GPS Ready (${lat}, ${lng})`);
+          callBackend(pos.coords.latitude, pos.coords.longitude);
+        },
+        () => {
+          resolveViaIp();
+        },
+        { timeout: 6000 }
+      );
+    } else {
+      await resolveViaIp();
+    }
+  };
+
   const runLiveWorldScan = async (overrideQ?: string) => {
     const q = (overrideQ ?? worldInput).trim();
     if (!q) {
-      onNotify('Enter a medical term to scan.', 'error');
+      onNotify('Enter a medicine or medical problem to scan online.', 'error');
       return;
     }
+    if (overrideQ) setWorldInput(overrideQ);
     setWorldBusy(true);
-    let wiki = '';
-    let fda = '';
-    let pubmed = '';
-    try {
-      const r = await fetch(
-        `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(q.replace(/\s+/g, '_'))}`
-      );
-      if (r.ok) {
-        const j = (await r.json()) as { extract?: string };
-        if (j.extract) wiki = j.extract;
-      }
-    } catch {
-      // ignore
-    }
-    try {
-      const r = await fetch(
-        `https://api.fda.gov/drug/label.json?search=openfda.generic_name:${encodeURIComponent(
-          q
-        )}+openfda.brand_name:${encodeURIComponent(q)}&limit=1`
-      );
-      if (r.ok) {
-        const j = (await r.json()) as { results?: Array<{ indications_and_usage?: string[] }> };
-        const rec = j.results?.[0];
-        if (rec?.indications_and_usage?.[0]) {
-          fda = rec.indications_and_usage[0].slice(0, 260);
-        }
-      }
-    } catch {
-      // ignore
-    }
-    try {
-      const r = await fetch(
-        `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=${encodeURIComponent(
-          q
-        )}&retmode=json&retmax=3`
-      );
-      if (r.ok) {
-        const j = (await r.json()) as { esearchresult?: { idlist?: string[] } };
-        const ids = j.esearchresult?.idlist || [];
-        if (ids.length) {
-          const s = await fetch(
-            `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id=${ids.join(
-              ','
-            )}&retmode=json`
-          );
-          if (s.ok) {
-            const sj = (await s.json()) as { result?: Record<string, { title?: string }> };
-            pubmed = ids
-              .map((id) => sj.result?.[id]?.title)
-              .filter(Boolean)
-              .map((t) => `• ${t}`)
-              .join('\n');
-          }
-        }
-      }
-    } catch {
-      // ignore
-    }
-
+    const langTuple = langList.find((l) => l[0] === currentLang);
+    const langDisplayName = langTuple ? langTuple[1] : 'English';
     const ql = q.toLowerCase();
     const lm = medicinesData.find(
-      (m) => m.name.toLowerCase().includes(ql) || m.tags.includes(ql)
+      (m) => m.name.toLowerCase().includes(ql) || m.tags.toLowerCase().includes(ql)
     );
-    const spoken = [wiki ? wiki.slice(0, 240) : '', lm ? `${lm.name}. ${lm.dose}` : '']
-      .filter(Boolean)
-      .join('. ');
 
+    try {
+      const res = await fetch('/api/ai/online-search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: q,
+          targetLangCode: currentLang,
+          targetLangName: langDisplayName,
+        }),
+      });
+      const json = (await res.json().catch(() => ({}))) as {
+        result?: OnlineSearchResult;
+        sources?: GroundedSource[];
+        offlineFallback?: boolean;
+      };
+
+      if (res.ok && json.result) {
+        const spoken = json.result.speakSummary || json.result.purposeOrCause;
+        setWorldResults({
+          structured: json.result,
+          sources: json.sources || [],
+          localMed: lm ? `${lm.name}: ${lm.dose} — ${lm.use}` : '',
+          spoken,
+          skipTranslate: !json.offlineFallback,
+        });
+        setWorldBusy(false);
+        if (spoken) onSpeak(spoken, !json.offlineFallback);
+        return;
+      }
+    } catch {
+      // fall through to offline/local fallback
+    }
+
+    const spokenFallback = lm
+      ? `${lm.name}. ${lm.use}. ${lm.dose}`
+      : `Verified NIH, WHO and Drugs.com links ready for ${q}`;
     setWorldResults({
-      wiki,
-      fda,
-      pubmed,
-      localMed: lm ? `${lm.name}: ${lm.dose}` : '',
-      spoken: spoken || `Links ready for ${q}`,
+      localMed: lm ? `${lm.name}: ${lm.dose} — ${lm.use}` : '',
+      spoken: spokenFallback,
+      skipTranslate: Boolean(lm),
     });
     setWorldBusy(false);
-    if (spoken) onSpeak(spoken);
+    onSpeak(spokenFallback, Boolean(lm));
   };
 
   useEffect(() => {
@@ -435,11 +659,12 @@ export const ClinicalToolsAndGuides: React.FC<ClinicalToolsAndGuidesProps> = ({
           <select
             value={voiceMode}
             onChange={(e) => setVoiceMode(e.target.value as VoiceMode)}
-            className="bg-slate-950/80 border border-slate-600 rounded-xl px-2 py-2 text-xs w-full sm:w-auto"
+            className="bg-slate-950/80 border border-emerald-500/50 rounded-xl px-2 py-2 text-xs w-full sm:w-auto text-emerald-200 font-semibold"
           >
-            <option value="auto">🤖 Smart Auto (Phone+Online)</option>
-            <option value="online">🌐 Online MP3 Voice</option>
-            <option value="native">📱 Phone TTS Only</option>
+            <option value="auto">Smart Auto (HD AI + Phone)</option>
+            <option value="gemini">HD AI Voice (Urdu/55 Langs)</option>
+            <option value="online">Online MP3 Voice</option>
+            <option value="native">Phone TTS Only</option>
           </select>
 
           <select
@@ -504,6 +729,145 @@ export const ClinicalToolsAndGuides: React.FC<ClinicalToolsAndGuidesProps> = ({
             Stop Voice
           </button>
         </div>
+
+        {/* Instant Any-Text Voice Speaker */}
+        <div className="flex flex-col sm:flex-row gap-2 pt-1 border-t border-white/10">
+          <input
+            type="text"
+            value={quickSpeakText}
+            onChange={(e) => setQuickSpeakText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && quickSpeakText.trim()) {
+                onSpeak(quickSpeakText.trim());
+              }
+            }}
+            placeholder="Yahan koi bhi dawai ka naam ya jumla likhein aur Speak dabayein — HD aawaz mein bolega..."
+            className="flex-1 bg-slate-950/85 border border-slate-600 rounded-xl px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-sky-400"
+          />
+          <button
+            type="button"
+            onClick={() => {
+              if (!quickSpeakText.trim()) {
+                onSpeak(strings.voiceTestPhrase);
+              } else {
+                onSpeak(quickSpeakText.trim());
+              }
+            }}
+            className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs px-4 py-2 rounded-xl whitespace-nowrap"
+          >
+            🔊 {strings.listenBtn}
+          </button>
+        </div>
+      </section>
+
+      {/* GOOGLE SUPER MEDICINE & PHRASE TRANSLATION SYSTEM (ALL 55 LANGUAGES) */}
+      <section
+        id="sec-translator"
+        className="theme-surface border-2 border-emerald-400/50 rounded-3xl p-4 sm:p-5 space-y-3"
+      >
+        <div className="flex flex-wrap justify-between items-center gap-2">
+          <div className="flex items-center gap-2.5">
+            <span className="w-9 h-9 rounded-xl bg-emerald-500/20 border border-emerald-400/50 flex items-center justify-center shrink-0">
+              <Languages className="w-5 h-5 text-emerald-300" />
+            </span>
+            <div>
+              <h2 className="text-sm sm:text-base font-extrabold text-emerald-300">
+                {strings.translatorTitle}
+              </h2>
+              <p className="text-[11px] text-slate-200">
+                {strings.translatorSub}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => runBatchMedicineTranslation(true)}
+            className="bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/50 text-emerald-200 font-bold text-xs px-3 py-1.5 rounded-xl whitespace-nowrap"
+          >
+            ↻ Re-Translate All 66 Meds
+          </button>
+        </div>
+
+        <div className="flex flex-wrap gap-1.5 text-[11px]">
+          {[
+            'Panadol 500mg — 1 tablet after meal for fever',
+            'Tab Augmentin 625mg 1 tab BD x 5 days',
+            'Cap Risek 20mg before breakfast for acidity',
+            'Calpol Syrup for 14 kg child fever',
+          ].map((preset) => (
+            <button
+              key={preset}
+              type="button"
+              onClick={() => runSuperTranslator(preset)}
+              className="bg-slate-900/80 hover:bg-slate-800 border border-slate-600 text-slate-100 px-2.5 py-1.5 rounded-xl"
+            >
+              {preset.split('—')[0].slice(0, 26)}
+            </button>
+          ))}
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-12 gap-2">
+          <input
+            type="text"
+            value={superTransInput}
+            onChange={(e) => setSuperTransInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') runSuperTranslator();
+            }}
+            placeholder="Dawai ka naam ya jumla likhein: e.g. 'Glucophage 500mg' ya 'Subah khali pet khayein'..."
+            className="sm:col-span-6 bg-slate-950/85 border border-slate-600 rounded-xl px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-emerald-400"
+          />
+          <select
+            value={superTransLang}
+            onChange={(e) => setSuperTransLang(e.target.value)}
+            className="sm:col-span-3 bg-slate-950/85 border border-slate-600 rounded-xl px-2.5 py-2 text-xs text-slate-100"
+          >
+            {langList.map(([code, label]) => (
+              <option key={code} value={code}>
+                {label}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={() => runSuperTranslator()}
+            disabled={superTransBusy}
+            className="sm:col-span-3 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs px-4 py-2 rounded-xl whitespace-nowrap"
+          >
+            {superTransBusy ? 'Translating...' : '🌐 Translate & Speak'}
+          </button>
+        </div>
+
+        {superTransOut && (
+          <div className="bg-slate-950/85 border border-emerald-400/50 rounded-2xl p-3.5 text-xs space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <strong className="text-sm text-emerald-300">{superTransOut.medicineNameInLang}</strong>
+              <button
+                type="button"
+                onClick={() =>
+                  voiceEngine.speak(superTransOut.speakText, {
+                    mode: voiceMode,
+                    rate: voiceSpeed,
+                    gender: voiceGender,
+                    specificVoice,
+                    lang: superTransLang,
+                    skipTranslate: true,
+                  })
+                }
+                className="inline-flex items-center gap-1 bg-sky-500 text-slate-950 font-bold text-[11px] px-3 py-1 rounded-lg"
+              >
+                <Volume2 className="w-3.5 h-3.5" />
+                {strings.listenBtn} ({superTransLang.toUpperCase()})
+              </button>
+            </div>
+            <div className="text-slate-100 leading-relaxed font-semibold">
+              {superTransOut.translatedText}
+            </div>
+            <div className="text-amber-200 bg-amber-950/50 border border-amber-500/30 rounded-xl p-2">
+              {superTransOut.usageAndDose}
+            </div>
+          </div>
+        )}
       </section>
 
       {/* 66 WORLD MEDICINES GRID */}
@@ -837,13 +1201,23 @@ export const ClinicalToolsAndGuides: React.FC<ClinicalToolsAndGuidesProps> = ({
             </h2>
             <p className="text-[11px] sm:text-xs text-slate-200">{gpsStatus}</p>
           </div>
-          <button
-            type="button"
-            onClick={locateGps}
-            className="bg-rose-500 hover:bg-rose-400 text-white font-bold text-xs px-3 py-2 rounded-xl whitespace-nowrap"
-          >
-            📡 Detect My GPS
-          </button>
+          <div className="flex flex-wrap gap-1.5">
+            <button
+              type="button"
+              onClick={locateGps}
+              className="bg-rose-500 hover:bg-rose-400 text-white font-bold text-xs px-3 py-2 rounded-xl whitespace-nowrap"
+            >
+              📡 Detect My GPS
+            </button>
+            <button
+              type="button"
+              onClick={speakNearbyPlaces}
+              disabled={nearbyQuickBusy}
+              className="bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-black text-xs px-3 py-2 rounded-xl whitespace-nowrap"
+            >
+              {nearbyQuickBusy ? 'Locating...' : '🔊 Speak Nearby Hospital & Store'}
+            </button>
+          </div>
         </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
@@ -884,6 +1258,32 @@ export const ClinicalToolsAndGuides: React.FC<ClinicalToolsAndGuidesProps> = ({
             <ExternalLink className="w-3.5 h-3.5 shrink-0" />
           </a>
         </div>
+
+        {nearbyQuickOut && (
+          <div className="bg-slate-950/85 border border-rose-400/40 rounded-2xl p-3 space-y-2 text-xs">
+            <div className="whitespace-pre-line text-slate-100 leading-relaxed">
+              {nearbyQuickOut.summary}
+            </div>
+            {nearbyQuickOut.places.length > 0 && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                {nearbyQuickOut.places.slice(0, 6).map((p, idx) => (
+                  <a
+                    key={idx}
+                    href={p.mapsUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="bg-slate-900 border border-slate-700 hover:border-emerald-400 rounded-xl p-2 flex items-center justify-between gap-2"
+                  >
+                    <span className="truncate font-semibold text-white">
+                      {p.name} ({p.type})
+                    </span>
+                    <span className="text-emerald-300 font-mono shrink-0">{p.distanceKm} km ↗</span>
+                  </a>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </section>
 
       {/* POWER CLINICAL TOOLS */}
@@ -1264,39 +1664,60 @@ export const ClinicalToolsAndGuides: React.FC<ClinicalToolsAndGuidesProps> = ({
         </div>
 
         {worldResults && (
-          <div className="bg-slate-950/85 border border-indigo-400/50 rounded-2xl p-3.5 space-y-2 text-xs">
-            {worldResults.wiki && (
-              <div className="bg-indigo-950/60 border border-indigo-400/40 rounded-xl p-3">
-                <strong className="text-indigo-300">🌐 2026 Encyclopedia:</strong>
-                <p className="mt-1 text-slate-200">{worldResults.wiki}</p>
-              </div>
-            )}
-            {worldResults.fda && (
-              <div className="bg-sky-950/60 border border-sky-400/40 rounded-xl p-3">
-                <strong className="text-sky-300">💊 US OpenFDA Use:</strong>
-                <p className="mt-1 text-slate-200">{worldResults.fda}</p>
-              </div>
-            )}
-            {worldResults.pubmed && (
-              <div className="bg-teal-950/60 border border-teal-400/40 rounded-xl p-3 whitespace-pre-line">
-                <strong className="text-teal-300">🔬 PubMed Studies:</strong>
-                <div className="mt-1 text-slate-200">{worldResults.pubmed}</div>
+          <div className="bg-slate-950/85 border border-indigo-400/50 rounded-2xl p-3.5 space-y-2.5 text-xs">
+            {worldResults.structured && (
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <strong className="text-sm text-white">{worldResults.structured.subjectTitle}</strong>
+                  <span className="text-[10px] font-bold bg-indigo-500/20 border border-indigo-400/50 text-indigo-200 px-2 py-0.5 rounded-lg">
+                    {worldResults.structured.category}
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                  <div className="bg-indigo-950/50 border border-indigo-400/40 rounded-xl p-2.5">
+                    <strong className="text-indigo-300">🩺 Kis Liye / Purpose:</strong>
+                    <p className="mt-1 text-slate-200">{worldResults.structured.purposeOrCause}</p>
+                  </div>
+                  <div className="bg-emerald-950/50 border border-emerald-400/40 rounded-xl p-2.5">
+                    <strong className="text-emerald-300">💊 Kitni aur Kab (Dose):</strong>
+                    <p className="mt-1 text-slate-200">{worldResults.structured.dosageAndUsage}</p>
+                  </div>
+                  <div className="bg-sky-950/50 border border-sky-400/40 rounded-xl p-2.5">
+                    <strong className="text-sky-300">🌿 Ilaj &amp; Care:</strong>
+                    <p className="mt-1 text-slate-200">{worldResults.structured.treatmentAndCare}</p>
+                  </div>
+                  <div className="bg-rose-950/50 border border-rose-400/40 rounded-xl p-2.5">
+                    <strong className="text-rose-300">⚠️ Ehtiyat:</strong>
+                    <p className="mt-1 text-rose-100">{worldResults.structured.warnings}</p>
+                  </div>
+                </div>
               </div>
             )}
             {worldResults.localMed && (
-              <div className="bg-emerald-950/60 border border-emerald-400/40 rounded-xl p-3">
-                <strong>💊 Local Guide:</strong> {worldResults.localMed}
+              <div className="bg-emerald-950/60 border border-emerald-400/40 rounded-xl p-2.5">
+                <strong>💊 66-Med Local Match:</strong> {worldResults.localMed}
               </div>
             )}
-            {!worldResults.wiki && !worldResults.fda && !worldResults.pubmed && !worldResults.localMed && (
-              <div className="text-amber-200">
-                Offline or no direct summary found — use WHO, NIH, PubMed &amp; Drugs.com links above.
+            {worldResults.sources && worldResults.sources.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 text-[11px]">
+                {worldResults.sources.map((s, idx) => (
+                  <a
+                    key={idx}
+                    href={s.uri}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="bg-slate-900 border border-slate-600 text-sky-300 px-2.5 py-1 rounded-xl inline-flex items-center gap-1"
+                  >
+                    <span>{s.title}</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                ))}
               </div>
             )}
             {worldResults.spoken && (
               <button
                 type="button"
-                onClick={() => onSpeak(worldResults.spoken!)}
+                onClick={() => onSpeak(worldResults.spoken!, worldResults.skipTranslate)}
                 className="bg-sky-500 text-slate-950 font-bold text-xs px-3 py-1.5 rounded-lg"
               >
                 🔊 Speak Summary

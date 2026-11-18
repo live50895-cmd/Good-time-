@@ -11,6 +11,7 @@ import {
   QrCode,
   RefreshCw,
   ShieldAlert,
+  Sparkles,
   Stethoscope,
   Trash2,
   Volume2,
@@ -34,6 +35,7 @@ import {
   SavedPhoto,
   ScheduleMed,
   SmartAlarm,
+  VisionScanResult,
   VitalRecord,
 } from '../types/health';
 import {
@@ -46,6 +48,7 @@ import {
 interface AnatomyAndVitalsSectionProps {
   searchQuery: string;
   profile: ProfileId;
+  langDisplayName?: string;
   strings: I18nStrings;
   lmpDate: string;
   setLmpDate: (d: string) => void;
@@ -56,7 +59,7 @@ interface AnatomyAndVitalsSectionProps {
   setAlarms: React.Dispatch<React.SetStateAction<SmartAlarm[]>>;
   medSchedule: ScheduleMed[];
   setMedSchedule: React.Dispatch<React.SetStateAction<ScheduleMed[]>>;
-  onSpeak: (txt: string) => void;
+  onSpeak: (txt: string, skipTranslate?: boolean) => void;
   onSyncApplied: () => void;
   onNotify: (msg: string, tone?: 'info' | 'success' | 'error') => void;
 }
@@ -81,6 +84,7 @@ const quickOrgans: Array<[string, string]> = [
 export const AnatomyAndVitalsSection: React.FC<AnatomyAndVitalsSectionProps> = ({
   searchQuery,
   profile,
+  langDisplayName = 'Roman Urdu',
   strings,
   lmpDate,
   setLmpDate,
@@ -122,6 +126,8 @@ export const AnatomyAndVitalsSection: React.FC<AnatomyAndVitalsSectionProps> = (
   const [scanContrast, setScanContrast] = useState<number>(100);
   const [scanZoom, setScanZoom] = useState<number>(100);
   const [scanCamErr, setScanCamErr] = useState<string>('');
+  const [filmAiBusy, setFilmAiBusy] = useState<boolean>(false);
+  const [filmAiResult, setFilmAiResult] = useState<VisionScanResult | null>(null);
   const [eyeCheckStatus, setEyeCheckStatus] = useState<string>('');
   const [pulseOut, setPulseOut] = useState<string>(
     'Experimental demo — asli BP/Pulse ke liye digital meter use karein.'
@@ -471,6 +477,55 @@ export const AnatomyAndVitalsSection: React.FC<AnatomyAndVitalsSectionProps> = (
     setSavedPhotos(next);
     writeStorageJson('saved_med_photos', next);
     onNotify('Film photo saved in Saved Scan & Prescription Photos!', 'success');
+  };
+
+  const analyzeLoadedFilmWithAi = async () => {
+    let dataUrl = '';
+    if (camActive && videoRef.current && videoRef.current.videoWidth) {
+      const c = document.createElement('canvas');
+      c.width = videoRef.current.videoWidth;
+      c.height = videoRef.current.videoHeight;
+      c.getContext('2d')?.drawImage(videoRef.current, 0, 0);
+      dataUrl = c.toDataURL('image/jpeg', 0.8);
+    } else if (filmUrl) {
+      dataUrl = filmUrl;
+    }
+    if (!dataUrl || !dataUrl.includes(',')) {
+      onNotify('Pehle Upload Film se X-Ray, Ultrasound ya Report ki photo lagayein.', 'error');
+      return;
+    }
+    setFilmAiBusy(true);
+    setFilmAiResult(null);
+    const chosenType =
+      scanMode === 'ultrasound' ? 'ultrasound' : scanMode === 'xray' ? 'xray' : 'bp_report';
+    try {
+      const res = await fetch('/api/ai/vision-scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          imageBase64: dataUrl.split(',')[1],
+          mimeType: 'image/jpeg',
+          scanType: chosenType,
+          languageName: langDisplayName,
+          activeMeds: medSchedule.map((m) => m.name),
+        }),
+      });
+      const json = (await res.json().catch(() => ({}))) as {
+        scan?: VisionScanResult;
+        error?: string;
+      };
+      if (res.ok && json.scan) {
+        setFilmAiResult(json.scan);
+        onSpeak(json.scan.speakSummary || json.scan.recommendation, true);
+        onNotify(`${json.scan.title} AI check complete!`, 'success');
+      } else {
+        onNotify(json.error || 'AI Vision check unavailable right now.', 'error');
+      }
+    } catch {
+      onNotify('Network error analyzing film.', 'error');
+    } finally {
+      setFilmAiBusy(false);
+    }
   };
 
   // Optical Pulse Demo
@@ -1272,6 +1327,15 @@ export const AnatomyAndVitalsSection: React.FC<AnatomyAndVitalsSectionProps> = (
               >
                 💾 Save
               </button>
+              <button
+                type="button"
+                onClick={analyzeLoadedFilmWithAi}
+                disabled={filmAiBusy}
+                className="inline-flex items-center gap-1 bg-amber-400 hover:bg-amber-300 text-slate-950 font-black px-2.5 py-1 rounded-lg"
+              >
+                <Sparkles className="w-3 h-3" />
+                {filmAiBusy ? 'Analyzing...' : '🤖 AI Check Report'}
+              </button>
             </div>
 
             <div className="grid grid-cols-3 gap-2 text-[10px] text-slate-300">
@@ -1332,6 +1396,32 @@ export const AnatomyAndVitalsSection: React.FC<AnatomyAndVitalsSectionProps> = (
                 </div>
               )}
             </div>
+            {filmAiResult && (
+              <div className="bg-slate-900/95 border border-amber-400/50 rounded-xl p-3 space-y-1.5 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <strong className="text-white">{filmAiResult.title}</strong>
+                  <span className="px-2 py-0.5 rounded bg-amber-400 text-slate-950 font-black text-[10px]">
+                    {filmAiResult.verdict}
+                  </span>
+                </div>
+                <div className="text-slate-200 space-y-0.5">
+                  {filmAiResult.findings.map((f, i) => (
+                    <div key={i}>• {f}</div>
+                  ))}
+                </div>
+                <div className="text-emerald-300 font-semibold">
+                  Advice: {filmAiResult.recommendation}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onSpeak(filmAiResult.speakSummary, true)}
+                  className="inline-flex items-center gap-1 bg-sky-400 text-slate-950 font-bold text-[11px] px-2.5 py-1 rounded-lg"
+                >
+                  <Volume2 className="w-3 h-3" />
+                  Speak Again
+                </button>
+              </div>
+            )}
             {scanCamErr && <div className="text-[11px] text-rose-400">{scanCamErr}</div>}
           </div>
 

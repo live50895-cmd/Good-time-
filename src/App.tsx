@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  Globe,
+  Languages,
   Palette,
   Printer,
   Search,
@@ -11,7 +13,11 @@ import {
 import { AiAndParchiSection } from './components/AiAndParchiSection';
 import { AnatomyAndVitalsSection } from './components/AnatomyAndVitalsSection';
 import { ClinicalToolsAndGuides } from './components/ClinicalToolsAndGuides';
+import { EmergencyTriageAndCpr } from './components/EmergencyTriageAndCpr';
 import { GoogleDocsPanel } from './components/GoogleDocsPanel';
+import { InternationalHospitalHub } from './components/InternationalHospitalHub';
+import { VisionHalalAndTrends } from './components/VisionHalalAndTrends';
+import { WorldMedicalRadar } from './components/WorldMedicalRadar';
 import {
   bodyAnatomyData,
   catalogItems,
@@ -21,12 +27,13 @@ import {
   scanOpBabyGuides,
 } from './data/healthData';
 import {
-  EMBEDDED_BABY_KAABA_SVG,
   i18n,
+  I18nStrings,
   langList,
   makeThemeIconSvg,
   rtlLangs,
   themes50,
+  USER_KAABA_BABY_BG,
   WHATSAPP_NUM,
 } from './data/themesAndLangs';
 import { voiceEngine, VoiceGender, VoiceMode } from './services/voiceEngine';
@@ -36,6 +43,7 @@ import {
   SmartAlarm,
   VitalRecord,
   VoiceState,
+  WorkspaceFocus,
 } from './types/health';
 import {
   compressImageFile,
@@ -58,12 +66,16 @@ export default function App() {
   });
   const [themesOpen, setThemesOpen] = useState<boolean>(false);
   const [bgDim, setBgDim] = useState<number>(() => {
-    const saved = parseInt(localStorage.getItem('bg_opacity') || '62', 10);
-    return !isNaN(saved) ? saved : 62;
+    const saved = parseInt(localStorage.getItem('bg_opacity') || '38', 10);
+    return !isNaN(saved) ? saved : 38;
   });
-  const [customBgUrl, setCustomBgUrl] = useState<string>(
-    () => localStorage.getItem('custom_bg_image') || EMBEDDED_BABY_KAABA_SVG
-  );
+  const [customBgUrl, setCustomBgUrl] = useState<string>(() => {
+    const saved = localStorage.getItem('custom_bg_image');
+    if (!saved || saved.startsWith('data:image/svg+xml')) {
+      return USER_KAABA_BABY_BG;
+    }
+    return saved;
+  });
   const [pinCustomIcon, setPinCustomIcon] = useState<boolean>(
     () => localStorage.getItem('pin_custom_icon') === '1'
   );
@@ -72,7 +84,16 @@ export default function App() {
   );
 
   const [profile, setProfile] = useState<ProfileId>('self');
-  const [currentLang, setCurrentLang] = useState<string>('ur');
+  const [currentLang, setCurrentLang] = useState<string>(
+    () => localStorage.getItem('selected_lang_code') || 'ur'
+  );
+  const [localizedMap, setLocalizedMap] = useState<Record<string, I18nStrings>>(() =>
+    readStorageJson<Record<string, I18nStrings>>('noor_ui_loc_v2', {})
+  );
+  const [translatingUi, setTranslatingUi] = useState<boolean>(false);
+  const [patientEasy, setPatientEasy] = useState<boolean>(
+    () => localStorage.getItem('patient_easy_mode') === '1'
+  );
   const [bigFont, setBigFont] = useState<boolean>(
     () => localStorage.getItem('big_font_mode') === '1'
   );
@@ -105,6 +126,7 @@ export default function App() {
   const [incomingParchiText, setIncomingParchiText] = useState<string>('');
   const [incomingFilmUrl, setIncomingFilmUrl] = useState<string>('');
   const [worldScanQuery, setWorldScanQuery] = useState<string>('');
+  const [hubSearchQuery, setHubSearchQuery] = useState<string>('');
   const [catalogCat, setCatalogCat] = useState<string>('ALL');
   const [lmpDate, setLmpDate] = useState<string>('');
 
@@ -120,6 +142,7 @@ export default function App() {
   const [summaryOpen, setSummaryOpen] = useState<boolean>(false);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [syncVersion, setSyncVersion] = useState<number>(0);
+  const [workspaceFocus, setWorkspaceFocus] = useState<WorkspaceFocus>('all');
 
   const notify = useCallback((text: string, tone: 'info' | 'success' | 'error' = 'info') => {
     const id = Date.now() + Math.floor(Math.random() * 1000);
@@ -150,23 +173,66 @@ export default function App() {
 
   // Apply Accessibility Modes to document.body
   useEffect(() => {
-    document.body.classList.toggle('big-font-mode', bigFont);
+    document.body.classList.toggle('big-font-mode', bigFont || patientEasy);
     localStorage.setItem('big_font_mode', bigFont ? '1' : '0');
-  }, [bigFont]);
+    localStorage.setItem('patient_easy_mode', patientEasy ? '1' : '0');
+  }, [bigFont, patientEasy]);
 
   useEffect(() => {
     document.body.classList.toggle('sun-mode', sunMode);
     localStorage.setItem('sun_mode', sunMode ? '1' : '0');
   }, [sunMode]);
 
-  // Apply RTL Direction when language changes
+  // Persist language & apply RTL Direction when language changes
   useEffect(() => {
+    localStorage.setItem('selected_lang_code', currentLang);
     document.documentElement.dir = rtlLangs.includes(currentLang) ? 'rtl' : 'ltr';
   }, [currentLang]);
 
   const activeTheme = themes50[themeIdx] || themes50[0];
-  const strings = i18n[currentLang] || i18n.en;
   const activeLangTuple = langList.find((l) => l[0] === currentLang) || langList[0];
+
+  // Dynamically localize FULL App UI into any of the 55 selected languages
+  useEffect(() => {
+    if (i18n[currentLang] || localizedMap[currentLang]) {
+      setTranslatingUi(false);
+      return;
+    }
+    let cancelled = false;
+    setTranslatingUi(true);
+    fetch('/api/ai/localize-ui', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        targetLangCode: currentLang,
+        targetLangName: activeLangTuple[1],
+        baseStrings: i18n.en,
+      }),
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((json: { strings?: I18nStrings } | null) => {
+        if (cancelled || !json?.strings) return;
+        setLocalizedMap((prev) => {
+          const next = { ...prev, [currentLang]: json.strings! };
+          writeStorageJson('noor_ui_loc_v2', next);
+          return next;
+        });
+      })
+      .catch(() => {
+        // Fallback smoothly to English UI if offline
+      })
+      .finally(() => {
+        if (!cancelled) setTranslatingUi(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentLang, activeLangTuple, localizedMap]);
+
+  const strings = useMemo(
+    () => i18n[currentLang] || localizedMap[currentLang] || i18n.en,
+    [currentLang, localizedMap]
+  );
 
   const appIconSrc = useMemo(() => {
     if (pinCustomIcon && customIconUrl) return customIconUrl;
@@ -190,13 +256,14 @@ export default function App() {
   }, [activeTheme, themeIdx, appIconSrc]);
 
   const handleSpeak = useCallback(
-    (txt: string) => {
+    (txt: string, skipTranslate = false) => {
       voiceEngine.speak(txt, {
         mode: voiceMode,
         rate: voiceSpeed,
         gender: voiceGender,
         specificVoice,
         lang: currentLang,
+        skipTranslate,
       });
     },
     [voiceMode, voiceSpeed, voiceGender, specificVoice, currentLang]
@@ -304,10 +371,32 @@ export default function App() {
     localStorage.removeItem('custom_app_icon');
     localStorage.removeItem('pin_custom_icon');
     localStorage.removeItem('custom_bg_image');
+    localStorage.setItem('bg_opacity', '38');
+    setBgDim(38);
     setPinCustomIcon(false);
     setCustomIconUrl('');
-    setCustomBgUrl(EMBEDDED_BABY_KAABA_SVG);
-    notify('Icon & Background reset to active Crystal Theme!', 'info');
+    setCustomBgUrl(USER_KAABA_BABY_BG);
+    notify('Kaaba Baby Background & Shield App Icon active!', 'info');
+  };
+
+  const handleUseKaabaIcon = () => {
+    setCustomIconUrl(USER_KAABA_BABY_BG);
+    setPinCustomIcon(true);
+    localStorage.setItem('pin_custom_icon', '1');
+    try {
+      localStorage.setItem('custom_app_icon', USER_KAABA_BABY_BG);
+    } catch {
+      // ignore
+    }
+    notify('Kaaba Baby Portrait Icon active!', 'success');
+  };
+
+  const handleUseKaabaBg = () => {
+    setCustomBgUrl(USER_KAABA_BABY_BG);
+    setBgDim(34);
+    localStorage.setItem('custom_bg_image', USER_KAABA_BABY_BG);
+    localStorage.setItem('bg_opacity', '34');
+    notify('Kaaba Baby Background photo active!', 'success');
   };
 
   // JSON Backup / Restore
@@ -350,6 +439,30 @@ export default function App() {
   };
 
   const jumpToSection = (id: string) => {
+    const focusMap: Record<string, WorkspaceFocus> = {
+      'sec-hospital-hub': 'online_hub',
+      'sec-emergency': 'emergency',
+      'sec-vision': 'vision',
+      'sec-gdocs': 'gdocs',
+      'sec-ai': 'ai',
+      'sec-parchi': 'ai',
+      'sec-translator': 'tools',
+      'sec-meds': 'tools',
+      'sec-ramadan': 'tools',
+      'sec-diet': 'tools',
+      'sec-pregnancy-weeks': 'tools',
+      'sec-online': 'tools',
+      'sec-world-radar': 'world',
+      'sec-idcard': 'anatomy',
+      'sec-catalog': 'anatomy',
+    };
+    if (workspaceFocus !== 'all' && focusMap[id] && workspaceFocus !== focusMap[id]) {
+      setWorkspaceFocus(focusMap[id]);
+      setTimeout(() => {
+        document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 60);
+      return;
+    }
     document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
@@ -363,6 +476,19 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [profile, summaryOpen, syncVersion]
   );
+
+  const profileContext = useMemo(() => {
+    const latestVitals =
+      summaryVitals
+        .slice(0, 4)
+        .map((v) => `${v.time}: ${v.summary}`)
+        .join(' | ') || 'None';
+    const meds =
+      medSchedule.map((m) => `${m.name} (${m.dose} @ ${m.time})`).join(', ') || 'None';
+    return `Profile: ${profile.toUpperCase()} | Recent Vitals: ${latestVitals} | Active Meds: ${meds}${
+      summaryNote && summaryNote !== 'None' ? ` | Notes: ${summaryNote}` : ''
+    }`;
+  }, [profile, summaryVitals, medSchedule, summaryNote]);
 
   const waReportHref = `https://wa.me/${WHATSAPP_NUM}?text=${encodeURIComponent(
     `Assalam-o-Alaikum, Noor Haram Report (${profile}):\n${
@@ -390,21 +516,28 @@ export default function App() {
       <div
         className="fixed inset-0 -z-10 transition-all duration-300 pointer-events-none"
         style={{
-          backgroundColor: sunMode
-            ? `rgba(241, 245, 249, ${Math.max(0.75, bgDim / 100)})`
-            : `rgba(2, 6, 23, ${bgDim / 100})`,
+          background: sunMode
+            ? `rgba(241, 245, 249, ${Math.max(0.68, bgDim / 100)})`
+            : `linear-gradient(180deg, rgba(2, 6, 23, ${Math.max(0.18, bgDim / 115)}) 0%, rgba(2, 6, 23, ${Math.min(0.72, (bgDim + 12) / 100)}) 100%)`,
         }}
       />
 
       {/* Sticky Top Header */}
-      <header className="sticky top-0 z-[70] bg-slate-950/85 backdrop-blur-xl border-b border-white/15 px-3 py-2.5 no-print">
+      <header className="sticky top-0 z-[70] bg-slate-950/80 backdrop-blur-xl border-b border-white/15 px-3 py-2.5 no-print">
         <div className="max-w-6xl mx-auto flex items-center justify-between gap-2 flex-wrap">
           <div className="flex items-center gap-2.5 min-w-0">
-            <img
-              src={appIconSrc}
-              alt="Noor Haram 2026"
-              className="w-10 h-10 rounded-2xl object-cover border border-emerald-400/70 shrink-0 shadow-md"
-            />
+            <button
+              type="button"
+              onClick={() => setThemesOpen((o) => !o)}
+              title="Customize App Icon & Background"
+              className="rounded-2xl p-0.5 border border-amber-300/70 shadow-lg hover:scale-105 transition shrink-0"
+            >
+              <img
+                src={appIconSrc}
+                alt="Noor Haram 2026"
+                className="w-10 h-10 rounded-[14px] object-cover"
+              />
+            </button>
             <div className="min-w-0">
               <h1 className="text-sm sm:text-base font-extrabold text-white truncate">
                 Noor Haram 2026 — AI Health &amp; Docs
@@ -422,13 +555,13 @@ export default function App() {
 
           <nav className="hidden lg:flex items-center gap-1 text-xs">
             {[
+              ['sec-hospital-hub', '🏥 Super Hub'],
+              ['sec-emergency', '🚨 SOS'],
+              ['sec-vision', '🔬 Vision'],
               ['sec-gdocs', '📄 Docs'],
               ['sec-ai', '🤖 AI'],
-              ['sec-parchi', '📜 Parchi'],
               ['sec-meds', '💊 66 Meds'],
               ['sec-ramadan', '🌙 Ramadan'],
-              ['sec-diet', '🍲 Diet'],
-              ['sec-pregnancy-weeks', '🤰 W1-40'],
               ['sec-idcard', '🪪 QR ID'],
             ].map(([id, label]) => (
               <button
@@ -496,11 +629,11 @@ export default function App() {
                   🎲 Random Theme
                 </button>
                 <label className="flex items-center gap-1.5 text-[11px] text-slate-300">
-                  <span>BG Dim</span>
+                  <span>BG Clarity</span>
                   <input
                     type="range"
-                    min={20}
-                    max={88}
+                    min={15}
+                    max={85}
                     value={bgDim}
                     onChange={(e) => {
                       const val = Number(e.target.value);
@@ -521,6 +654,20 @@ export default function App() {
             </div>
 
             <div className="flex flex-wrap items-center gap-2 bg-slate-900/90 border border-slate-700 rounded-xl p-2.5">
+              <button
+                type="button"
+                onClick={handleUseKaabaIcon}
+                className="bg-amber-400 hover:bg-amber-300 text-slate-950 font-extrabold px-3 py-1.5 rounded-lg"
+              >
+                🕌 Kaaba Baby Icon
+              </button>
+              <button
+                type="button"
+                onClick={handleUseKaabaBg}
+                className="bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-extrabold px-3 py-1.5 rounded-lg"
+              >
+                🖼️ Kaaba Baby BG Photo
+              </button>
               <label className="cursor-pointer inline-flex items-center gap-1 bg-sky-500 text-slate-950 font-bold px-3 py-1.5 rounded-lg">
                 <Upload className="w-3.5 h-3.5" />
                 Icon Gallery Upload
@@ -550,7 +697,7 @@ export default function App() {
                 onClick={handleResetVisuals}
                 className="bg-slate-800 hover:bg-slate-700 text-rose-200 px-2.5 py-1.5 rounded-lg"
               >
-                ↺ Reset Visuals
+                ↺ Shield Icon + Kaaba BG
               </button>
             </div>
 
@@ -621,6 +768,39 @@ export default function App() {
           <div className="flex flex-wrap gap-1.5 text-xs">
             <button
               type="button"
+              onClick={() => setPatientEasy((p) => !p)}
+              className={`px-2.5 py-2 rounded-xl font-bold border ${
+                patientEasy
+                  ? 'bg-emerald-400 text-slate-950 border-emerald-200'
+                  : 'bg-slate-900/80 border-slate-600 text-slate-100'
+              }`}
+            >
+              🩺 {strings.patientModeLabel}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                const medsText =
+                  medSchedule.length > 0
+                    ? medSchedule
+                        .slice(0, 5)
+                        .map((m) => `${m.name} ${m.dose} at ${m.time}`)
+                        .join('. ')
+                    : 'No daily medicine scheduled yet';
+                const vitalsText = summaryVitals[0]
+                  ? `${summaryVitals[0].time}: ${summaryVitals[0].summary}`
+                  : 'No vitals logged yet';
+                handleSpeak(
+                  `${strings.voiceTestPhrase} Profile ${profile}. ${vitalsText}. Medicines: ${medsText}.`
+                );
+              }}
+              className="inline-flex items-center gap-1 bg-sky-500 hover:bg-sky-400 text-slate-950 font-extrabold px-2.5 py-2 rounded-xl"
+            >
+              <Volume2 className="w-3.5 h-3.5" />
+              {strings.speakSummaryBtn}
+            </button>
+            <button
+              type="button"
               onClick={() => setBigFont((b) => !b)}
               className={`px-2.5 py-2 rounded-xl font-bold border ${
                 bigFont
@@ -678,6 +858,82 @@ export default function App() {
           </div>
         </div>
 
+        {/* 1-Tap Real Native Language & Patient Easy Command Strip */}
+        <section className="theme-surface border border-sky-400/50 rounded-2xl p-2.5 no-print space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-1.5 font-extrabold text-sky-300">
+              <Languages className="w-4 h-4" />
+              <span>55-Language Real Voice &amp; UI:</span>
+              <span className="bg-sky-500/20 border border-sky-400/50 text-sky-100 px-2 py-0.5 rounded-lg">
+                {activeLangTuple[1]}
+              </span>
+              {translatingUi && (
+                <span className="text-[10px] text-amber-300 animate-pulse">
+                  Translating full interface...
+                </span>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => handleSpeak(strings.voiceTestPhrase, true)}
+              className="inline-flex items-center gap-1 bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-extrabold text-[11px] px-2.5 py-1 rounded-lg"
+            >
+              <Volume2 className="w-3.5 h-3.5" />
+              {strings.launchVoice}
+            </button>
+          </div>
+
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-[11px]">
+            {['ur', 'ur_script', 'en', 'ar', 'hi', 'pa', 'ps', 'sd', 'bn', 'es', 'fr', 'tr'].map(
+              (code) => {
+                const tup = langList.find((l) => l[0] === code);
+                if (!tup) return null;
+                const active = currentLang === code;
+                return (
+                  <button
+                    key={code}
+                    type="button"
+                    onClick={() => setCurrentLang(code)}
+                    className={`px-2.5 py-1.5 rounded-xl font-bold whitespace-nowrap border transition ${
+                      active
+                        ? 'bg-amber-400 text-slate-950 border-amber-200 shadow-md'
+                        : 'bg-slate-900/80 hover:bg-slate-800 border-slate-700 text-slate-200'
+                    }`}
+                  >
+                    {tup[1]}
+                  </button>
+                );
+              }
+            )}
+          </div>
+
+          {patientEasy && medSchedule.length > 0 && (
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1 border-t border-white/10 text-xs">
+              {[
+                ['☀️ Morning / Subah', medSchedule.filter((m) => /am|0[6-9]|1[0-1]|sehri|subah/i.test(m.time))],
+                ['🌤️ Afternoon / Dopeher', medSchedule.filter((m) => /1[2-6]:/i.test(m.time))],
+                ['🌙 Night / Raat', medSchedule.filter((m) => /pm|1[7-9]|2[0-3]|iftar|raat/i.test(m.time))],
+              ].map(([slotLabel, list]) => (
+                <div
+                  key={slotLabel as string}
+                  className="bg-slate-950/80 border border-emerald-400/40 rounded-xl p-2"
+                >
+                  <div className="font-bold text-emerald-300 mb-1">{slotLabel as string}</div>
+                  {(list as ScheduleMed[]).length > 0 ? (
+                    (list as ScheduleMed[]).map((m) => (
+                      <div key={m.id} className="text-[11px] text-slate-100 truncate">
+                        • {m.name} ({m.dose}) @ {m.time}
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-[11px] text-slate-400">—</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
         {/* Global Search */}
         <section className="theme-surface border border-emerald-400/45 rounded-2xl p-3 no-print space-y-2">
           <div className="relative">
@@ -686,7 +942,7 @@ export default function App() {
               type="text"
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
-              placeholder="Search 37,800+ features: Panadol, Arinac, Ramadan, Diet, Week 20, Sugar, BP..."
+              placeholder={strings.searchPlaceholder}
               className="w-full bg-slate-950/85 border border-emerald-500/60 rounded-2xl px-4 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-emerald-300 pl-10"
             />
           </div>
@@ -699,101 +955,277 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => {
+                  setWorkspaceFocus('online_hub');
+                  setHubSearchQuery(`${debouncedQuery} `);
                   setWorldScanQuery(debouncedQuery);
-                  jumpToSection('sec-online');
+                  setTimeout(() => jumpToSection('sec-hospital-hub'), 60);
                 }}
-                className="underline text-indigo-300"
+                className="underline text-emerald-300 font-bold"
               >
-                🌐 Live Scan "{debouncedQuery}"
+                🏥 Online Hospital Search "{debouncedQuery}"
               </button>
             </div>
           )}
+
+          {/* Workspace Focus Switcher */}
+          <div className="flex flex-wrap gap-1.5 pt-1 border-t border-white/10 text-xs">
+            {(
+              [
+                ['all', strings.tabAll],
+                ['online_hub', `🏥 ${strings.hubTabSearch}`],
+                ['emergency', strings.tabEmergency],
+                ['vision', strings.tabVision],
+                ['ai', strings.tabAi],
+                ['gdocs', strings.tabDocs],
+                ['tools', strings.tabTools],
+                ['world', strings.launchWorld],
+                ['anatomy', strings.tabAnatomy],
+              ] as Array<[WorkspaceFocus, string]>
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setWorkspaceFocus(key)}
+                className={`px-3 py-1.5 rounded-xl font-bold whitespace-nowrap transition-colors ${
+                  workspaceFocus === key
+                    ? 'bg-emerald-400 text-slate-950'
+                    : 'bg-slate-900/80 hover:bg-slate-800 border border-slate-700 text-slate-200'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {/* Aasan 1-Tap Quick Launchpad (Easy Family Controls) */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-2 pt-1.5 text-xs">
+            <button
+              type="button"
+              onClick={() => {
+                handleSpeak(strings.voiceTestPhrase, true);
+                jumpToSection('sec-translator');
+              }}
+              className="bg-sky-500/20 hover:bg-sky-500/30 border border-sky-400/50 text-sky-100 font-bold py-2.5 px-3 rounded-xl text-left transition truncate"
+            >
+              🔊 {strings.launchVoice}
+            </button>
+            <button
+              type="button"
+              onClick={() => jumpToSection('sec-translator')}
+              className="bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/50 text-emerald-100 font-bold py-2.5 px-3 rounded-xl text-left transition truncate"
+            >
+              🌐 {strings.launchTranslate}
+            </button>
+            <button
+              type="button"
+              onClick={() => jumpToSection('sec-meds')}
+              className="bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-400/50 text-cyan-100 font-bold py-2.5 px-3 rounded-xl text-left transition truncate"
+            >
+              💊 {strings.launchMeds}
+            </button>
+            <button
+              type="button"
+              onClick={() => jumpToSection('sec-ai')}
+              className="bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-400/50 text-indigo-100 font-bold py-2.5 px-3 rounded-xl text-left transition truncate"
+            >
+              🤖 {strings.launchAi}
+            </button>
+            <button
+              type="button"
+              onClick={() => jumpToSection('sec-parchi')}
+              className="bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/50 text-amber-100 font-bold py-2.5 px-3 rounded-xl text-left transition truncate"
+            >
+              📜 {strings.launchParchi}
+            </button>
+            <button
+              type="button"
+              onClick={() => jumpToSection('sec-world-radar')}
+              className="bg-teal-500/20 hover:bg-teal-500/30 border border-teal-400/50 text-teal-100 font-bold py-2.5 px-3 rounded-xl text-left transition truncate inline-flex items-center gap-1"
+            >
+              <Globe className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">{strings.launchWorld}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => jumpToSection('sec-emergency')}
+              className="bg-rose-500/25 hover:bg-rose-500/35 border border-rose-400/60 text-rose-100 font-bold py-2.5 px-3 rounded-xl text-left transition truncate"
+            >
+              🚨 {strings.launchEmergency}
+            </button>
+          </div>
         </section>
 
+        {/* INTERNATIONAL SUPER HOSPITAL ONLINE HUB (ONLINE MED/DISEASE + X-RAY/ULTRASOUND/BP/100+ LAB + SPOKEN NEARBY) */}
+        {(workspaceFocus === 'all' || workspaceFocus === 'online_hub') && (
+          <InternationalHospitalHub
+            currentLang={currentLang}
+            langDisplayName={activeLangTuple[1]}
+            strings={strings}
+            profileContext={profileContext}
+            medSchedule={medSchedule}
+            externalQuery={hubSearchQuery}
+            onSpeak={handleSpeak}
+            onSaveToAi={(txt) => setLastAiText(txt)}
+            onJumpToGoogleDocs={() => {
+              setWorkspaceFocus('gdocs');
+              setTimeout(() => jumpToSection('sec-gdocs'), 60);
+            }}
+            onNotify={notify}
+          />
+        )}
+
+        {/* AI EMERGENCY TRIAGE, LIVE 110 BPM CPR & FIRST-AID COMMAND */}
+        {(workspaceFocus === 'all' || workspaceFocus === 'emergency') && (
+          <EmergencyTriageAndCpr
+            profile={profile}
+            langDisplayName={activeLangTuple[1]}
+            strings={strings}
+            profileContext={profileContext}
+            onSpeak={handleSpeak}
+            onSaveTriageToAi={(txt) => setLastAiText(txt)}
+            onJumpToGoogleDocs={() => {
+              setWorkspaceFocus('gdocs');
+              setTimeout(() => jumpToSection('sec-gdocs'), 60);
+            }}
+            onNotify={notify}
+          />
+        )}
+
+        {/* 2026 WORLD LATEST MEDICAL SYSTEM & INTERNATIONAL BRAND RADAR */}
+        {(workspaceFocus === 'all' || workspaceFocus === 'world') && (
+          <WorldMedicalRadar
+            currentLang={currentLang}
+            langDisplayName={activeLangTuple[1]}
+            strings={strings}
+            onSpeak={handleSpeak}
+            onSaveToAi={(txt) => setLastAiText(txt)}
+            onJumpToGoogleDocs={() => {
+              setWorkspaceFocus('gdocs');
+              setTimeout(() => jumpToSection('sec-gdocs'), 60);
+            }}
+            onNotify={notify}
+          />
+        )}
+
+        {/* 3-IN-1 VISION LAB (HALAL / MEAL CALORIES / STRIP CONFLICTS) & TREND INTELLIGENCE */}
+        {(workspaceFocus === 'all' || workspaceFocus === 'vision') && (
+          <VisionHalalAndTrends
+            profile={profile}
+            langDisplayName={activeLangTuple[1]}
+            strings={strings}
+            medSchedule={medSchedule}
+            onSpeak={handleSpeak}
+            onSaveBriefingToAi={(txt) => setLastAiText(txt)}
+            onJumpToGoogleDocs={() => {
+              setWorkspaceFocus('gdocs');
+              setTimeout(() => jumpToSection('sec-gdocs'), 60);
+            }}
+            onNotify={notify}
+          />
+        )}
+
         {/* GOOGLE DOCS WORKSPACE INTEGRATION */}
-        <GoogleDocsPanel
-          profile={profile}
-          lastAiText={lastAiText}
-          lastParchiText={lastParchiText}
-          medSchedule={medSchedule}
-          onSpeak={handleSpeak}
-          onSendToParchi={(txt) => {
-            setIncomingParchiText(txt);
-            jumpToSection('sec-parchi');
-          }}
-          onNotify={notify}
-        />
+        {(workspaceFocus === 'all' || workspaceFocus === 'gdocs') && (
+          <GoogleDocsPanel
+            profile={profile}
+            strings={strings}
+            lastAiText={lastAiText}
+            lastParchiText={lastParchiText}
+            medSchedule={medSchedule}
+            onSpeak={handleSpeak}
+            onSendToParchi={(txt) => {
+              setIncomingParchiText(txt);
+              setWorkspaceFocus('ai');
+              setTimeout(() => jumpToSection('sec-parchi'), 60);
+            }}
+            onNotify={notify}
+          />
+        )}
 
         {/* AI DOCTOR CHAT & PARCHI SCANNER */}
-        <AiAndParchiSection
-          currentLang={currentLang}
-          langDisplayName={activeLangTuple[1]}
-          strings={strings}
-          autoSpeakAi={autoSpeakAi}
-          onSpeak={handleSpeak}
-          onStopVoice={handleStopVoice}
-          onLoadFilmImageUrl={(url) => setIncomingFilmUrl(url)}
-          lastAiText={lastAiText}
-          setLastAiText={setLastAiText}
-          lastParchiText={lastParchiText}
-          setLastParchiText={setLastParchiText}
-          incomingParchiText={incomingParchiText}
-          onJumpToGoogleDocs={() => jumpToSection('sec-gdocs')}
-          onNotify={notify}
-        />
+        {(workspaceFocus === 'all' || workspaceFocus === 'ai') && (
+          <AiAndParchiSection
+            currentLang={currentLang}
+            langDisplayName={activeLangTuple[1]}
+            profileContext={profileContext}
+            strings={strings}
+            autoSpeakAi={autoSpeakAi}
+            onSpeak={handleSpeak}
+            onStopVoice={handleStopVoice}
+            onLoadFilmImageUrl={(url) => {
+              setIncomingFilmUrl(url);
+            }}
+            lastAiText={lastAiText}
+            setLastAiText={setLastAiText}
+            lastParchiText={lastParchiText}
+            setLastParchiText={setLastParchiText}
+            incomingParchiText={incomingParchiText}
+            onJumpToGoogleDocs={() => {
+              setWorkspaceFocus('gdocs');
+              setTimeout(() => jumpToSection('sec-gdocs'), 60);
+            }}
+            onNotify={notify}
+          />
+        )}
 
         {/* CLINICAL TOOLS, VOICE ENGINE, MEDICINES, RAMADAN, DIET, PREGNANCY, GPS & INTERNET SCAN */}
-        <ClinicalToolsAndGuides
-          searchQuery={debouncedQuery}
-          currentLang={currentLang}
-          strings={strings}
-          lmpDate={lmpDate}
-          voiceState={voiceState}
-          voiceGender={voiceGender}
-          setVoiceGender={setVoiceGender}
-          specificVoice={specificVoice}
-          setSpecificVoice={setSpecificVoice}
-          voiceMode={voiceMode}
-          setVoiceMode={setVoiceMode}
-          voiceSpeed={voiceSpeed}
-          setVoiceSpeed={setVoiceSpeed}
-          autoSpeakAi={autoSpeakAi}
-          setAutoSpeakAi={setAutoSpeakAi}
-          onSpeak={handleSpeak}
-          onForceOnline={handleForceOnline}
-          onStopVoice={handleStopVoice}
-          onAddRamadanAlarms={handleAddRamadanAlarms}
-          onJumpToExtraCatalog={() => {
-            setCatalogCat('🌟 +1,100 Extra 2026 Upgrades');
-            jumpToSection('sec-catalog');
-          }}
-          externalWorldScanQuery={worldScanQuery}
-          onNotify={notify}
-        />
+        {(workspaceFocus === 'all' || workspaceFocus === 'tools') && (
+          <ClinicalToolsAndGuides
+            searchQuery={debouncedQuery}
+            currentLang={currentLang}
+            strings={strings}
+            lmpDate={lmpDate}
+            voiceState={voiceState}
+            voiceGender={voiceGender}
+            setVoiceGender={setVoiceGender}
+            specificVoice={specificVoice}
+            setSpecificVoice={setSpecificVoice}
+            voiceMode={voiceMode}
+            setVoiceMode={setVoiceMode}
+            voiceSpeed={voiceSpeed}
+            setVoiceSpeed={setVoiceSpeed}
+            autoSpeakAi={autoSpeakAi}
+            setAutoSpeakAi={setAutoSpeakAi}
+            onSpeak={handleSpeak}
+            onForceOnline={handleForceOnline}
+            onStopVoice={handleStopVoice}
+            onAddRamadanAlarms={handleAddRamadanAlarms}
+            onJumpToExtraCatalog={() => {
+              setCatalogCat('🌟 +1,100 Extra 2026 Upgrades');
+              setWorkspaceFocus('anatomy');
+              setTimeout(() => jumpToSection('sec-catalog'), 60);
+            }}
+            externalWorldScanQuery={worldScanQuery}
+            onNotify={notify}
+          />
+        )}
 
         {/* BODY MAP, 40 PARTS, 24 GUIDES, FILM VIEWER, 42 DISEASES, 37.8K CATALOG, CHARTS, ALARMS, QR ID, SYNC, VITALS */}
-        <AnatomyAndVitalsSection
-          key={syncVersion}
-          searchQuery={debouncedQuery}
-          profile={profile}
-          strings={strings}
-          lmpDate={lmpDate}
-          setLmpDate={setLmpDate}
-          incomingFilmDataUrl={incomingFilmUrl}
-          catalogCat={catalogCat}
-          setCatalogCat={setCatalogCat}
-          alarms={alarms}
-          setAlarms={setAlarms}
-          medSchedule={medSchedule}
-          setMedSchedule={setMedSchedule}
-          onSpeak={handleSpeak}
-          onSyncApplied={() => {
-            setAlarms(readStorageJson<SmartAlarm[]>('smart_alarms', []));
-            setMedSchedule(readStorageJson<ScheduleMed[]>('med_schedule', []));
-            setSyncVersion((v) => v + 1);
-          }}
-          onNotify={notify}
-        />
+        {(workspaceFocus === 'all' || workspaceFocus === 'anatomy') && (
+          <AnatomyAndVitalsSection
+            key={syncVersion}
+            searchQuery={debouncedQuery}
+            profile={profile}
+            langDisplayName={activeLangTuple[1]}
+            strings={strings}
+            lmpDate={lmpDate}
+            setLmpDate={setLmpDate}
+            incomingFilmDataUrl={incomingFilmUrl}
+            catalogCat={catalogCat}
+            setCatalogCat={setCatalogCat}
+            alarms={alarms}
+            setAlarms={setAlarms}
+            medSchedule={medSchedule}
+            setMedSchedule={setMedSchedule}
+            onSpeak={handleSpeak}
+            onSyncApplied={() => {
+              setAlarms(readStorageJson<SmartAlarm[]>('smart_alarms', []));
+              setMedSchedule(readStorageJson<ScheduleMed[]>('med_schedule', []));
+              setSyncVersion((v) => v + 1);
+            }}
+            onNotify={notify}
+          />
+        )}
       </main>
 
       {/* A4 Doctor Summary Modal */}

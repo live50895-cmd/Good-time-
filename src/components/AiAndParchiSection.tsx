@@ -17,12 +17,13 @@ import {
   decodeParchiAndLabs,
 } from '../data/healthData';
 import { I18nStrings, langSpeechMap, WHATSAPP_NUM } from '../data/themesAndLangs';
-import { AiChatMessage } from '../types/health';
+import { AiChatMessage, GroundedSource } from '../types/health';
 import { compressImageFile } from '../utils/qrAndStorage';
 
 interface AiAndParchiSectionProps {
   currentLang: string;
   langDisplayName: string;
+  profileContext: string;
   strings: I18nStrings;
   autoSpeakAi: boolean;
   onSpeak: (text: string) => void;
@@ -48,6 +49,7 @@ interface SpeechRecInstance {
 export const AiAndParchiSection: React.FC<AiAndParchiSectionProps> = ({
   currentLang,
   langDisplayName,
+  profileContext,
   strings,
   autoSpeakAi,
   onSpeak,
@@ -64,6 +66,8 @@ export const AiAndParchiSection: React.FC<AiAndParchiSectionProps> = ({
   const [aiInput, setAiInput] = useState<string>('');
   const [aiBusy, setAiBusy] = useState<boolean>(false);
   const [micActive, setMicActive] = useState<boolean>(false);
+  const [useWebEvidence, setUseWebEvidence] = useState<boolean>(true);
+  const [useProfileCtx, setUseProfileCtx] = useState<boolean>(true);
   const [ocrStatus, setOcrStatus] = useState<string>('');
   const [messages, setMessages] = useState<AiChatMessage[]>([
     {
@@ -100,7 +104,7 @@ export const AiAndParchiSection: React.FC<AiAndParchiSectionProps> = ({
     imageBase64?: string;
     mimeType?: string;
     mode: 'doctor' | 'parchi' | 'ocr';
-  }): Promise<{ reply?: string; error?: string; offlineFallback?: boolean }> => {
+  }): Promise<{ reply?: string; sources?: GroundedSource[]; error?: string; offlineFallback?: boolean }> => {
     try {
       const res = await fetch('/api/ai/ask', {
         method: 'POST',
@@ -111,10 +115,13 @@ export const AiAndParchiSection: React.FC<AiAndParchiSectionProps> = ({
           imageBase64: payload.imageBase64,
           mimeType: payload.mimeType,
           mode: payload.mode,
+          useSearch: useWebEvidence && !payload.imageBase64,
+          profileContext: useProfileCtx ? profileContext : undefined,
         }),
       });
       const json = (await res.json().catch(() => ({}))) as {
         reply?: string;
+        sources?: GroundedSource[];
         error?: string;
         offlineFallback?: boolean;
       };
@@ -124,7 +131,7 @@ export const AiAndParchiSection: React.FC<AiAndParchiSectionProps> = ({
           offlineFallback: Boolean(json.offlineFallback),
         };
       }
-      return { reply: json.reply };
+      return { reply: json.reply, sources: json.sources };
     } catch {
       return { error: 'Network error reaching AI backend.', offlineFallback: true };
     }
@@ -145,31 +152,118 @@ export const AiAndParchiSection: React.FC<AiAndParchiSectionProps> = ({
       role: 'user',
       text: raw,
     };
-    setMessages((prev) => [...prev, userMsg]);
-
-    // 1. Instant offline clinical rule/lab/medicine analysis
+    const streamAiId = `a_${Date.now() + 1}`;
     const offline = analyzeOfflineClinicalQuery(raw);
-    const sections: string[] = [];
+    const offlineSections = offline.blocks.map((b) => `${b.title}\n${b.body}`);
+
+    const historyPayload = messages
+      .filter((m) => m.id !== 'welcome' && m.id !== 'cleared')
+      .slice(-6)
+      .map((m) => ({
+        role: (m.role === 'user' ? 'user' : 'model') as 'user' | 'model',
+        text: m.text.slice(0, 800),
+      }));
+
+    setMessages((prev) => [
+      ...prev,
+      userMsg,
+      {
+        id: streamAiId,
+        role: 'ai',
+        text: offlineSections.length > 0 ? offlineSections.join('\n\n') : 'Clinical AI jawab likh raha hai...',
+      },
+    ]);
+
+    let streamedText = '';
+    let streamSources: GroundedSource[] = [];
+    let offlineFallback = false;
+    let streamError = '';
+
+    try {
+      const res = await fetch('/api/ai/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: raw,
+          languageName: langDisplayName,
+          useSearch: useWebEvidence,
+          profileContext: useProfileCtx ? profileContext : undefined,
+          history: historyPayload,
+        }),
+      });
+
+      if (!res.ok) {
+        const errJson = (await res.json().catch(() => ({}))) as {
+          error?: string;
+          offlineFallback?: boolean;
+        };
+        offlineFallback = Boolean(errJson.offlineFallback);
+        streamError = errJson.error || `Server AI unavailable (${res.status})`;
+      } else if (res.body) {
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const events = buffer.split('\n\n');
+          buffer = events.pop() || '';
+
+          for (const ev of events) {
+            const line = ev
+              .split('\n')
+              .find((l) => l.startsWith('data: '));
+            if (!line) continue;
+            try {
+              const payload = JSON.parse(line.slice(6)) as {
+                chunk?: string;
+                done?: boolean;
+                sources?: GroundedSource[];
+                error?: string;
+              };
+              if (payload.chunk) {
+                streamedText += payload.chunk;
+                const liveCombined =
+                  offlineSections.length > 0
+                    ? `${streamedText}\n\n${offlineSections.join('\n\n')}`
+                    : streamedText;
+                setMessages((prev) =>
+                  prev.map((m) => (m.id === streamAiId ? { ...m, text: liveCombined } : m))
+                );
+              }
+              if (payload.sources) {
+                streamSources = payload.sources;
+              }
+              if (payload.error) {
+                streamError = payload.error;
+              }
+            } catch {
+              // ignore malformed SSE chunk
+            }
+          }
+        }
+      }
+    } catch {
+      offlineFallback = true;
+      streamError = 'Network error reaching AI backend.';
+    }
+
+    const finalSections: string[] = [];
     const speakParts: string[] = [];
 
-    // 2. Call server-side Gemini AI
-    const gem = await askServerGemini({ prompt: raw, mode: 'doctor' });
-    if (gem.reply) {
-      sections.push(`✨ Gemini Clinical AI:\n${gem.reply}`);
-      speakParts.push(gem.reply);
-    } else if (gem.error && !gem.offlineFallback) {
-      sections.push(`⚠️ AI Notice: ${gem.error}`);
+    if (streamedText.trim()) {
+      finalSections.push(streamedText.trim());
+      speakParts.push(streamedText.trim());
+    } else if (streamError && !offlineFallback) {
+      finalSections.push(`AI Notice: ${streamError}`);
     }
 
-    offline.blocks.forEach((b) => {
-      sections.push(`${b.title}\n${b.body}`);
-    });
-    if (offline.spokenText) {
-      speakParts.push(offline.spokenText);
-    }
+    offlineSections.forEach((s) => finalSections.push(s));
+    if (offline.spokenText) speakParts.push(offline.spokenText);
 
-    // 3. Wikipedia + Catalog fallback if both server Gemini and offline rules had no direct hit
-    if (!gem.reply && offline.blocks.length === 0) {
+    if (!streamedText.trim() && offlineSections.length === 0) {
       try {
         const wr = await fetch(
           `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(
@@ -179,7 +273,7 @@ export const AiAndParchiSection: React.FC<AiAndParchiSectionProps> = ({
         if (wr.ok) {
           const wj = (await wr.json()) as { extract?: string };
           if (wj.extract) {
-            sections.push(`🌐 Online Medical Summary:\n${wj.extract.slice(0, 380)}`);
+            finalSections.push(`Online Medical Summary:\n${wj.extract.slice(0, 380)}`);
             speakParts.push(wj.extract.slice(0, 240));
           }
         }
@@ -188,7 +282,7 @@ export const AiAndParchiSection: React.FC<AiAndParchiSectionProps> = ({
       }
     }
 
-    if (sections.length === 0) {
+    if (finalSections.length === 0) {
       const words = raw
         .toLowerCase()
         .replace(/[?.,!/()]/g, ' ')
@@ -201,28 +295,33 @@ export const AiAndParchiSection: React.FC<AiAndParchiSectionProps> = ({
         .slice(0, 2);
       if (catHits.length > 0) {
         catHits.forEach((h) => {
-          sections.push(`📘 ${h.title}\n${h.desc}`);
+          finalSections.push(`${h.title}\n${h.desc}`);
           speakParts.push(`${h.title}. ${h.desc}`);
         });
       } else {
         const fb =
           'Koi bhi bemari (sar dard, bukhar, gas, khansi, dast, sugar, bp) ya dawai ka naam likhein — main turant dose aur ehtiyat bataunga.';
-        sections.push(fb);
+        finalSections.push(fb);
         speakParts.push(fb);
       }
     }
 
-    const combinedText = sections.join('\n\n');
+    const combinedText = finalSections.join('\n\n');
     const combinedSpeak = speakParts.join(' ');
     setLastAiText(combinedSpeak);
 
-    const aiMsg: AiChatMessage = {
-      id: `a_${Date.now()}`,
-      role: 'ai',
-      text: combinedText,
-      speakRaw: combinedSpeak,
-    };
-    setMessages((prev) => [...prev, aiMsg]);
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === streamAiId
+          ? {
+              ...m,
+              text: combinedText,
+              speakRaw: combinedSpeak,
+              sources: streamSources,
+            }
+          : m
+      )
+    );
     setAiBusy(false);
 
     if (autoSpeakAi && combinedSpeak) {
@@ -382,7 +481,7 @@ export const AiAndParchiSection: React.FC<AiAndParchiSectionProps> = ({
       onLoadFilmImageUrl(dataUrl);
       const gem = await askServerGemini({
         prompt:
-          'Is doctor parchi (prescription) ya lab report ki photo ko Roman Urdu mein tafseel se padh kar batayein: har dawai ka naam, kitni dafa leni hai (OD/BD/TDS), kab khani hai, ya report ke har number ka matlab (normal vs abnormal) aur safety ehtiyat.',
+          `Read and explain this doctor prescription or lab report photo clearly in ${langDisplayName}: list every medicine name, dosing frequency (OD/BD/TDS/HS), timing (before/after food), or each lab marker value (normal vs abnormal) plus clear safety warnings.`,
         imageBase64: dataUrl.split(',')[1],
         mimeType: 'image/jpeg',
         mode: 'parchi',
@@ -424,7 +523,25 @@ export const AiAndParchiSection: React.FC<AiAndParchiSectionProps> = ({
               <p className="text-[11px] sm:text-xs text-slate-200">{strings.aiSub}</p>
             </div>
           </div>
-          <div className="flex gap-1.5 shrink-0">
+          <div className="flex flex-wrap items-center gap-2 shrink-0 text-[11px]">
+            <label className="flex items-center gap-1.5 bg-slate-900/80 border border-slate-600 px-2.5 py-1.5 rounded-xl cursor-pointer">
+              <input
+                type="checkbox"
+                checked={useWebEvidence}
+                onChange={(e) => setUseWebEvidence(e.target.checked)}
+                className="accent-emerald-400"
+              />
+              <span>Live Medical Web Search</span>
+            </label>
+            <label className="flex items-center gap-1.5 bg-slate-900/80 border border-slate-600 px-2.5 py-1.5 rounded-xl cursor-pointer">
+              <input
+                type="checkbox"
+                checked={useProfileCtx}
+                onChange={(e) => setUseProfileCtx(e.target.checked)}
+                className="accent-sky-400"
+              />
+              <span>Profile Vitals Context</span>
+            </label>
             <button
               type="button"
               onClick={() =>
@@ -445,7 +562,7 @@ export const AiAndParchiSection: React.FC<AiAndParchiSectionProps> = ({
         </div>
 
         {/* Chat History */}
-        <div className="bg-slate-950/80 border border-slate-700 rounded-2xl p-3 max-h-72 overflow-y-auto space-y-2.5 text-xs">
+        <div className="bg-slate-950/80 border border-slate-700 rounded-2xl p-3 max-h-80 overflow-y-auto space-y-2.5 text-xs">
           {messages.map((m) =>
             m.role === 'user' ? (
               <div
@@ -473,11 +590,27 @@ export const AiAndParchiSection: React.FC<AiAndParchiSectionProps> = ({
                   )}
                 </div>
                 <div className="whitespace-pre-line leading-relaxed">{m.text}</div>
+                {m.sources && m.sources.length > 0 && (
+                  <div className="pt-1.5 border-t border-emerald-500/30 flex flex-wrap gap-1.5 text-[10px]">
+                    <span className="text-emerald-300 font-bold">Verified Sources:</span>
+                    {m.sources.map((src, idx) => (
+                      <a
+                        key={idx}
+                        href={src.uri}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="underline text-sky-300 hover:text-sky-200 truncate max-w-[220px]"
+                      >
+                        {src.title}
+                      </a>
+                    ))}
+                  </div>
+                )}
               </div>
             )
           )}
           {aiBusy && (
-            <div className="text-emerald-300 text-xs px-2">⏳ Clinical AI jawab tayar kar raha hai...</div>
+            <div className="text-emerald-300 text-xs px-2">⏳ Streaming Clinical AI response...</div>
           )}
           <div ref={chatEndRef} />
         </div>
@@ -616,10 +749,10 @@ export const AiAndParchiSection: React.FC<AiAndParchiSectionProps> = ({
         <div className="flex flex-wrap justify-between items-center gap-2">
           <div>
             <h2 className="text-sm sm:text-base font-extrabold text-cyan-300">
-              📜 Doctor Parchi &amp; Lab Report Deep Scanner (AI Vision + Offline)
+              📜 {strings.parchiTitle}
             </h2>
             <p className="text-[11px] sm:text-xs text-slate-200">
-              Doctor ki likhi parchi (OD, BD, TDS, HS) ya Lab report (Hb, PLT, WBC, Sugar, LFT, RFT, TSH, Lipid, Uric Acid) paste ya upload karein:
+              {strings.parchiSub}
             </p>
           </div>
           <label className="cursor-pointer inline-flex items-center gap-1.5 bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-extrabold text-xs px-3 py-2 rounded-xl shrink-0">

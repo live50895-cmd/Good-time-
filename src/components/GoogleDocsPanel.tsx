@@ -27,6 +27,7 @@ import {
   listAppGoogleDocs,
   trashGoogleDoc,
 } from '../services/googleDocs';
+import { I18nStrings } from '../data/themesAndLangs';
 import {
   GoogleDocContent,
   GoogleDocSummary,
@@ -38,6 +39,7 @@ import { pKey, readStorageJson } from '../utils/qrAndStorage';
 
 interface GoogleDocsPanelProps {
   profile: ProfileId;
+  strings: I18nStrings;
   lastAiText: string;
   lastParchiText: string;
   medSchedule: ScheduleMed[];
@@ -66,6 +68,7 @@ type PendingAction =
 
 export const GoogleDocsPanel: React.FC<GoogleDocsPanelProps> = ({
   profile,
+  strings,
   lastAiText,
   lastParchiText,
   medSchedule,
@@ -318,10 +321,10 @@ export const GoogleDocsPanel: React.FC<GoogleDocsPanelProps> = ({
           </div>
           <div className="min-w-0">
             <h2 className="text-sm sm:text-base font-extrabold text-sky-300">
-              Google Docs Health Records Sync
+              {strings.gdocsTitle}
             </h2>
             <p className="text-xs text-slate-300">
-              Save doctor summaries, lab scans & prescriptions directly to Google Docs, or read existing docs aloud.
+              {strings.gdocsSub}
             </p>
           </div>
         </div>
